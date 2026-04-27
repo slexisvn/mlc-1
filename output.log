@@ -1,0 +1,794 @@
+╔══════════════════════════════════════════════════════════════╗
+║          MLC TypeScript — Machine Learning Compiler         ║
+║          Built from scratch, no external libraries          ║
+╚══════════════════════════════════════════════════════════════╝
+
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+▓  MULTICLASS CLASSIFIER — MLC Pipeline
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+
+════════════════════════════════════════════════════════════
+  Phase 1: Model Tracing (Capture Computation Graph)
+════════════════════════════════════════════════════════════
+═══ Traced Computation Graph ═══
+Input: id=4 shape=[1,784]
+Target: id=5
+
+── Forward ──
+  %6 = nn.dense(%4, %0) → [1,256]
+  %7 = bias_add(%6, %1) → [1,256]
+  %8 = relu(%7) → [1,256]
+  %9 = nn.dense(%8, %2) → [1,10]
+  %10 = bias_add(%9, %3) → [1,10]
+── Loss ──
+  %11 = cross_entropy(%10, %5) → [1]
+
+Output: id=10 shape=[1,10]
+Loss: id=11
+Parameters: 4
+  param_0: [256,784]
+  param_1: [1,256]
+  param_2: [10,256]
+  param_3: [1,10]
+
+════════════════════════════════════════════════════════════
+  Phase 2: High-Level IR Construction
+════════════════════════════════════════════════════════════
+@main(%x: Tensor[(1, 784), float32], %target: Tensor[(1), float32]) → Tensor[(1), float32] {
+  %0 = nn.dense(%x, meta[param_0])  // [1,256]
+  %1 = nn.bias_add(%0, meta[param_1])  // [1,256]
+  %2 = nn.relu(%1)  // [1,256]
+  %3 = nn.dense(%2, meta[param_2])  // [1,10]
+  %4 = nn.bias_add(%3, meta[param_3])  // [1,10]
+  %5 = cross_entropy(%4, %target)  // [1]
+}
+
+
+════════════════════════════════════════════════════════════
+  Phase 3: Graph-Level Optimizations
+════════════════════════════════════════════════════════════
+
+── 3.1 Constant Folding ──
+  Applied constant folding pass
+
+── 3.2 Operator Fusion ──
+  Fusion applied in 'main':
+    nn.dense + nn.bias_add + nn.relu → fused.dense_bias_relu
+    nn.dense + nn.bias_add → fused.dense_bias
+
+  After fusion:
+@main(%x: Tensor[(1, 784), float32], %target: Tensor[(1), float32]) → Tensor[(1), float32] {
+  %0 = fused.dense_bias_relu(%x, meta[param_0], meta[param_1])  // [1,256]  /* fused: nn.dense → nn.bias_add → nn.relu */
+  %1 = fused.dense_bias(%0, meta[param_2], meta[param_3])  // [1,10]  /* fused: nn.dense → nn.bias_add */
+  %2 = cross_entropy(%1, %target)  // [1]
+}
+
+  Summary: 3 total ops, 2 fused
+    nn.dense+nn.bias_add → fused.dense_bias
+    nn.dense+nn.bias_add+nn.relu → fused.dense_bias_relu
+
+════════════════════════════════════════════════════════════
+  Phase 4: Operator Lowering (→ TensorIR / Loop Nests)
+════════════════════════════════════════════════════════════
+  Lowered 2 PrimFunc(s):
+
+@fused_dense_bias_relu(A: Buffer[1,784], W: Buffer[256,784], B: Buffer[1,256], Out: Buffer[1,256]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 1):
+    for j in range(0, 256):
+      acc[0] = 0
+      for k in range(0, 784):  // reduction
+        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
+      acc[0] = (acc[0] + B[0, j])
+      Out[i, j] = max(acc[0], 0)
+}
+
+@fused_dense_bias(A: Buffer[1,256], W: Buffer[10,256], B: Buffer[1,10], Out: Buffer[1,10]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 1):
+    for j in range(0, 10):
+      acc[0] = 0
+      for k in range(0, 256):  // reduction
+        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
+      acc[0] = (acc[0] + B[0, j])
+      Out[i, j] = acc[0]
+}
+
+
+════════════════════════════════════════════════════════════
+  Phase 5: Schedule Transformations
+════════════════════════════════════════════════════════════
+  Scheduling fused_dense_bias_relu:
+    split(j, 32) → j_outer, j_inner
+    split(k, 56) → k_outer, k_inner
+    reorder(j_outer, k_outer, j_inner, k_inner)
+    parallel(j_outer)
+  fused_dense_bias: no tiling (loops too small or absent)
+
+  Scheduled TIR:
+@fused_dense_bias_relu(A: Buffer[1,784], W: Buffer[256,784], B: Buffer[1,256], Out: Buffer[1,256]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 1):
+    for j_outer in range(0, 8):  // parallel
+      for j_inner in range(0, 32):
+        acc[0] = 0
+        for k_outer in range(0, 14):  // reduction
+          for k_inner in range(0, 56):  // reduction
+            acc[0] = (acc[0] + (A[i, ((k_outer * 56) + k_inner)] * W[((j_outer * 32) + j_inner), ((k_outer * 56) + k_inner)]))
+        acc[0] = (acc[0] + B[0, ((j_outer * 32) + j_inner)])
+        Out[i, ((j_outer * 32) + j_inner)] = max(acc[0], 0)
+}
+
+@fused_dense_bias(A: Buffer[1,256], W: Buffer[10,256], B: Buffer[1,10], Out: Buffer[1,10]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 1):
+    for j in range(0, 10):
+      acc[0] = 0
+      for k in range(0, 256):  // reduction
+        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
+      acc[0] = (acc[0] + B[0, j])
+      Out[i, j] = acc[0]
+}
+
+
+════════════════════════════════════════════════════════════
+  Phase 6: Auto-Tuning (Search Best Schedule)
+════════════════════════════════════════════════════════════
+  [Skipped — pass runAutoTune=true to enable]
+  In production MLC, this phase searches ~1000-100000 configs
+  using cost models (XGBoost) + evolutionary search.
+
+════════════════════════════════════════════════════════════
+  Phase 7: Code Generation (→ JavaScript)
+════════════════════════════════════════════════════════════
+
+── Naive (unoptimized) code ──
+function fused_dense_bias_relu(A, W, B, Out) {
+  // Buffer shapes:
+  // A: [1, 784] (global)
+  // W: [256, 784] (global)
+  // B: [1, 256] (global)
+  // Out: [1, 256] (global)
+  
+  const acc = new Float32Array(1); // local
+  
+  for (let i = 0; i < 1; i++) {
+    for (let j = 0; j < 256; j++) {
+      acc[0] = 0;
+      for (let k = 0; k < 784; k++) {
+        acc[0] = (acc[0] + (A[i * 784 + k] * W[j * 784 + k]));
+      }
+      acc[0] = (acc[0] + B[0 * 256 + j]);
+      Out[i * 256 + j] = Math.max(acc[0], 0);
+    }
+  }
+}
+
+function fused_dense_bias(A, W, B, Out) {
+  // Buffer shapes:
+  // A: [1, 256] (global)
+  // W: [10, 256] (global)
+  // B: [1, 10] (global)
+  // Out: [1, 10] (global)
+  
+  const acc = new Float32Array(1); // local
+  
+  for (let i = 0; i < 1; i++) {
+    for (let j = 0; j < 10; j++) {
+      acc[0] = 0;
+      for (let k = 0; k < 256; k++) {
+        acc[0] = (acc[0] + (A[i * 256 + k] * W[j * 256 + k]));
+      }
+      acc[0] = (acc[0] + B[0 * 10 + j]);
+      Out[i * 10 + j] = acc[0];
+    }
+  }
+}
+
+
+── Scheduled (optimized) code ──
+function fused_dense_bias_relu(A, W, B, Out) {
+  // Buffer shapes:
+  // A: [1, 784] (global)
+  // W: [256, 784] (global)
+  // B: [1, 256] (global)
+  // Out: [1, 256] (global)
+  
+  const acc = new Float32Array(1); // local
+  
+  for (let i = 0; i < 1; i++) {
+    for (let j_outer = 0; j_outer < 8; j_outer++) { /* parallel */
+      for (let j_inner = 0; j_inner < 32; j_inner++) {
+        acc[0] = 0;
+        for (let k_outer = 0; k_outer < 14; k_outer++) {
+          for (let k_inner = 0; k_inner < 56; k_inner++) {
+            acc[0] = (acc[0] + (A[i * 784 + ((k_outer * 56) + k_inner)] * W[((j_outer * 32) + j_inner) * 784 + ((k_outer * 56) + k_inner)]));
+          }
+        }
+        acc[0] = (acc[0] + B[0 * 256 + ((j_outer * 32) + j_inner)]);
+        Out[i * 256 + ((j_outer * 32) + j_inner)] = Math.max(acc[0], 0);
+      }
+    }
+  }
+}
+
+function fused_dense_bias(A, W, B, Out) {
+  // Buffer shapes:
+  // A: [1, 256] (global)
+  // W: [10, 256] (global)
+  // B: [1, 10] (global)
+  // Out: [1, 10] (global)
+  
+  const acc = new Float32Array(1); // local
+  
+  for (let i = 0; i < 1; i++) {
+    for (let j = 0; j < 10; j++) {
+      acc[0] = 0;
+      for (let k = 0; k < 256; k++) {
+        acc[0] = (acc[0] + (A[i * 256 + k] * W[j * 256 + k]));
+      }
+      acc[0] = (acc[0] + B[0 * 10 + j]);
+      Out[i * 10 + j] = acc[0];
+    }
+  }
+}
+
+
+════════════════════════════════════════════════════════════
+  VERIFICATION
+════════════════════════════════════════════════════════════
+
+── Compiled Forward Verification ──
+  NDArray naive result: [-1.1971244812011719, -0.6616427302360535, 0.7501961588859558, 0.3288738429546356, 0.888874351978302...]
+  Compiled naive match: ✓
+  Compiled scheduled match: ✓
+
+── Benchmark ──
+  NDArray naive:       0.9394ms / inference
+  Compiled naive:      0.8608ms / inference
+    Speedup vs NDArray: 1.1x
+  Compiled scheduled:  0.8621ms / inference
+    Speedup vs NDArray: 1.1x
+
+── Autograd Training Verification ──
+  Training multiclass classifier for 5 steps...
+    Step 0: loss=2.173927 grads=✓
+    Step 1: loss=0.435771 grads=✓
+    Step 2: loss=0.204442 grads=✓
+    Step 3: loss=0.133111 grads=✓
+    Step 4: loss=0.099348 grads=✓
+  Loss changing: ✓ (2.1739 → 0.0993)
+
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+▓  BINARY CLASSIFIER — MLC Pipeline
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+
+════════════════════════════════════════════════════════════
+  Phase 1: Model Tracing (Capture Computation Graph)
+════════════════════════════════════════════════════════════
+═══ Traced Computation Graph ═══
+Input: id=48 shape=[1,784]
+Target: id=49
+
+── Forward ──
+  %50 = nn.dense(%48, %44) → [1,256]
+  %51 = bias_add(%50, %45) → [1,256]
+  %52 = relu(%51) → [1,256]
+  %53 = nn.dense(%52, %46) → [1,1]
+  %54 = bias_add(%53, %47) → [1,1]
+── Loss ──
+  %55 = bce_with_logits(%54, %49) → [1]
+
+Output: id=54 shape=[1,1]
+Loss: id=55
+Parameters: 4
+  param_0: [256,784]
+  param_1: [1,256]
+  param_2: [1,256]
+  param_3: [1,1]
+
+════════════════════════════════════════════════════════════
+  Phase 2: High-Level IR Construction
+════════════════════════════════════════════════════════════
+@main(%x: Tensor[(1, 784), float32], %target: Tensor[(1), float32]) → Tensor[(1), float32] {
+  %0 = nn.dense(%x, meta[param_0])  // [1,256]
+  %1 = nn.bias_add(%0, meta[param_1])  // [1,256]
+  %2 = nn.relu(%1)  // [1,256]
+  %3 = nn.dense(%2, meta[param_2])  // [1,1]
+  %4 = nn.bias_add(%3, meta[param_3])  // [1,1]
+  %5 = bce_with_logits(%4, %target)  // [1]
+}
+
+
+════════════════════════════════════════════════════════════
+  Phase 3: Graph-Level Optimizations
+════════════════════════════════════════════════════════════
+
+── 3.1 Constant Folding ──
+  Applied constant folding pass
+
+── 3.2 Operator Fusion ──
+  Fusion applied in 'main':
+    nn.dense + nn.bias_add + nn.relu → fused.dense_bias_relu
+    nn.dense + nn.bias_add → fused.dense_bias
+
+  After fusion:
+@main(%x: Tensor[(1, 784), float32], %target: Tensor[(1), float32]) → Tensor[(1), float32] {
+  %0 = fused.dense_bias_relu(%x, meta[param_0], meta[param_1])  // [1,256]  /* fused: nn.dense → nn.bias_add → nn.relu */
+  %1 = fused.dense_bias(%0, meta[param_2], meta[param_3])  // [1,1]  /* fused: nn.dense → nn.bias_add */
+  %2 = bce_with_logits(%1, %target)  // [1]
+}
+
+  Summary: 3 total ops, 2 fused
+    nn.dense+nn.bias_add → fused.dense_bias
+    nn.dense+nn.bias_add+nn.relu → fused.dense_bias_relu
+
+════════════════════════════════════════════════════════════
+  Phase 4: Operator Lowering (→ TensorIR / Loop Nests)
+════════════════════════════════════════════════════════════
+  Lowered 2 PrimFunc(s):
+
+@fused_dense_bias_relu(A: Buffer[1,784], W: Buffer[256,784], B: Buffer[1,256], Out: Buffer[1,256]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 1):
+    for j in range(0, 256):
+      acc[0] = 0
+      for k in range(0, 784):  // reduction
+        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
+      acc[0] = (acc[0] + B[0, j])
+      Out[i, j] = max(acc[0], 0)
+}
+
+@fused_dense_bias(A: Buffer[1,256], W: Buffer[1,256], B: Buffer[1,1], Out: Buffer[1,1]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 1):
+    for j in range(0, 1):
+      acc[0] = 0
+      for k in range(0, 256):  // reduction
+        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
+      acc[0] = (acc[0] + B[0, j])
+      Out[i, j] = acc[0]
+}
+
+
+════════════════════════════════════════════════════════════
+  Phase 5: Schedule Transformations
+════════════════════════════════════════════════════════════
+  Scheduling fused_dense_bias_relu:
+    split(j, 32) → j_outer, j_inner
+    split(k, 56) → k_outer, k_inner
+    reorder(j_outer, k_outer, j_inner, k_inner)
+    parallel(j_outer)
+  fused_dense_bias: no tiling (loops too small or absent)
+
+  Scheduled TIR:
+@fused_dense_bias_relu(A: Buffer[1,784], W: Buffer[256,784], B: Buffer[1,256], Out: Buffer[1,256]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 1):
+    for j_outer in range(0, 8):  // parallel
+      for j_inner in range(0, 32):
+        acc[0] = 0
+        for k_outer in range(0, 14):  // reduction
+          for k_inner in range(0, 56):  // reduction
+            acc[0] = (acc[0] + (A[i, ((k_outer * 56) + k_inner)] * W[((j_outer * 32) + j_inner), ((k_outer * 56) + k_inner)]))
+        acc[0] = (acc[0] + B[0, ((j_outer * 32) + j_inner)])
+        Out[i, ((j_outer * 32) + j_inner)] = max(acc[0], 0)
+}
+
+@fused_dense_bias(A: Buffer[1,256], W: Buffer[1,256], B: Buffer[1,1], Out: Buffer[1,1]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 1):
+    for j in range(0, 1):
+      acc[0] = 0
+      for k in range(0, 256):  // reduction
+        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
+      acc[0] = (acc[0] + B[0, j])
+      Out[i, j] = acc[0]
+}
+
+
+════════════════════════════════════════════════════════════
+  Phase 6: Auto-Tuning (Search Best Schedule)
+════════════════════════════════════════════════════════════
+  [Skipped — pass runAutoTune=true to enable]
+  In production MLC, this phase searches ~1000-100000 configs
+  using cost models (XGBoost) + evolutionary search.
+
+════════════════════════════════════════════════════════════
+  Phase 7: Code Generation (→ JavaScript)
+════════════════════════════════════════════════════════════
+
+── Naive (unoptimized) code ──
+function fused_dense_bias_relu(A, W, B, Out) {
+  // Buffer shapes:
+  // A: [1, 784] (global)
+  // W: [256, 784] (global)
+  // B: [1, 256] (global)
+  // Out: [1, 256] (global)
+  
+  const acc = new Float32Array(1); // local
+  
+  for (let i = 0; i < 1; i++) {
+    for (let j = 0; j < 256; j++) {
+      acc[0] = 0;
+      for (let k = 0; k < 784; k++) {
+        acc[0] = (acc[0] + (A[i * 784 + k] * W[j * 784 + k]));
+      }
+      acc[0] = (acc[0] + B[0 * 256 + j]);
+      Out[i * 256 + j] = Math.max(acc[0], 0);
+    }
+  }
+}
+
+function fused_dense_bias(A, W, B, Out) {
+  // Buffer shapes:
+  // A: [1, 256] (global)
+  // W: [1, 256] (global)
+  // B: [1, 1] (global)
+  // Out: [1, 1] (global)
+  
+  const acc = new Float32Array(1); // local
+  
+  for (let i = 0; i < 1; i++) {
+    for (let j = 0; j < 1; j++) {
+      acc[0] = 0;
+      for (let k = 0; k < 256; k++) {
+        acc[0] = (acc[0] + (A[i * 256 + k] * W[j * 256 + k]));
+      }
+      acc[0] = (acc[0] + B[0 + j]);
+      Out[i + j] = acc[0];
+    }
+  }
+}
+
+
+── Scheduled (optimized) code ──
+function fused_dense_bias_relu(A, W, B, Out) {
+  // Buffer shapes:
+  // A: [1, 784] (global)
+  // W: [256, 784] (global)
+  // B: [1, 256] (global)
+  // Out: [1, 256] (global)
+  
+  const acc = new Float32Array(1); // local
+  
+  for (let i = 0; i < 1; i++) {
+    for (let j_outer = 0; j_outer < 8; j_outer++) { /* parallel */
+      for (let j_inner = 0; j_inner < 32; j_inner++) {
+        acc[0] = 0;
+        for (let k_outer = 0; k_outer < 14; k_outer++) {
+          for (let k_inner = 0; k_inner < 56; k_inner++) {
+            acc[0] = (acc[0] + (A[i * 784 + ((k_outer * 56) + k_inner)] * W[((j_outer * 32) + j_inner) * 784 + ((k_outer * 56) + k_inner)]));
+          }
+        }
+        acc[0] = (acc[0] + B[0 * 256 + ((j_outer * 32) + j_inner)]);
+        Out[i * 256 + ((j_outer * 32) + j_inner)] = Math.max(acc[0], 0);
+      }
+    }
+  }
+}
+
+function fused_dense_bias(A, W, B, Out) {
+  // Buffer shapes:
+  // A: [1, 256] (global)
+  // W: [1, 256] (global)
+  // B: [1, 1] (global)
+  // Out: [1, 1] (global)
+  
+  const acc = new Float32Array(1); // local
+  
+  for (let i = 0; i < 1; i++) {
+    for (let j = 0; j < 1; j++) {
+      acc[0] = 0;
+      for (let k = 0; k < 256; k++) {
+        acc[0] = (acc[0] + (A[i * 256 + k] * W[j * 256 + k]));
+      }
+      acc[0] = (acc[0] + B[0 + j]);
+      Out[i + j] = acc[0];
+    }
+  }
+}
+
+
+════════════════════════════════════════════════════════════
+  VERIFICATION
+════════════════════════════════════════════════════════════
+
+── Compiled Forward Verification ──
+  NDArray naive result: [-0.5583121180534363]
+  Compiled naive match: ✓
+  Compiled scheduled match: ✓
+
+── Benchmark ──
+  NDArray naive:       0.9899ms / inference
+  Compiled naive:      0.8876ms / inference
+    Speedup vs NDArray: 1.1x
+  Compiled scheduled:  0.8689ms / inference
+    Speedup vs NDArray: 1.1x
+
+── Autograd Training Verification ──
+  Training binary classifier for 5 steps...
+    Step 0: loss=0.522747 grads=✓
+    Step 1: loss=0.162587 grads=✓
+    Step 2: loss=0.103500 grads=✓
+    Step 3: loss=0.076858 grads=✓
+    Step 4: loss=0.061265 grads=✓
+  Loss changing: ✓ (0.5227 → 0.0613)
+
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+▓  MULTILABEL CLASSIFIER — MLC Pipeline
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+
+════════════════════════════════════════════════════════════
+  Phase 1: Model Tracing (Capture Computation Graph)
+════════════════════════════════════════════════════════════
+═══ Traced Computation Graph ═══
+Input: id=92 shape=[1,784]
+Target: id=93
+
+── Forward ──
+  %94 = nn.dense(%92, %88) → [1,256]
+  %95 = bias_add(%94, %89) → [1,256]
+  %96 = sigmoid(%95) → [1,256]
+  %97 = nn.dense(%96, %90) → [1,20]
+  %98 = bias_add(%97, %91) → [1,20]
+── Loss ──
+  %99 = bce_with_logits(%98, %93) → [1]
+
+Output: id=98 shape=[1,20]
+Loss: id=99
+Parameters: 4
+  param_0: [256,784]
+  param_1: [1,256]
+  param_2: [20,256]
+  param_3: [1,20]
+
+════════════════════════════════════════════════════════════
+  Phase 2: High-Level IR Construction
+════════════════════════════════════════════════════════════
+@main(%x: Tensor[(1, 784), float32], %target: Tensor[(1), float32]) → Tensor[(1), float32] {
+  %0 = nn.dense(%x, meta[param_0])  // [1,256]
+  %1 = nn.bias_add(%0, meta[param_1])  // [1,256]
+  %2 = nn.sigmoid(%1)  // [1,256]
+  %3 = nn.dense(%2, meta[param_2])  // [1,20]
+  %4 = nn.bias_add(%3, meta[param_3])  // [1,20]
+  %5 = bce_with_logits(%4, %target)  // [1]
+}
+
+
+════════════════════════════════════════════════════════════
+  Phase 3: Graph-Level Optimizations
+════════════════════════════════════════════════════════════
+
+── 3.1 Constant Folding ──
+  Applied constant folding pass
+
+── 3.2 Operator Fusion ──
+  Fusion applied in 'main':
+    nn.dense + nn.bias_add + nn.sigmoid → fused.dense_bias_sigmoid
+    nn.dense + nn.bias_add → fused.dense_bias
+
+  After fusion:
+@main(%x: Tensor[(1, 784), float32], %target: Tensor[(1), float32]) → Tensor[(1), float32] {
+  %0 = fused.dense_bias_sigmoid(%x, meta[param_0], meta[param_1])  // [1,256]  /* fused: nn.dense → nn.bias_add → nn.sigmoid */
+  %1 = fused.dense_bias(%0, meta[param_2], meta[param_3])  // [1,20]  /* fused: nn.dense → nn.bias_add */
+  %2 = bce_with_logits(%1, %target)  // [1]
+}
+
+  Summary: 3 total ops, 2 fused
+    nn.dense+nn.bias_add → fused.dense_bias
+    nn.dense+nn.bias_add+nn.sigmoid → fused.dense_bias_sigmoid
+
+════════════════════════════════════════════════════════════
+  Phase 4: Operator Lowering (→ TensorIR / Loop Nests)
+════════════════════════════════════════════════════════════
+  Lowered 2 PrimFunc(s):
+
+@fused_dense_bias_sigmoid(A: Buffer[1,784], W: Buffer[256,784], B: Buffer[1,256], Out: Buffer[1,256]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 1):
+    for j in range(0, 256):
+      acc[0] = 0
+      for k in range(0, 784):  // reduction
+        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
+      acc[0] = (acc[0] + B[0, j])
+      Out[i, j] = (1 / (1 + Math.exp((0 - acc[0]))))
+}
+
+@fused_dense_bias(A: Buffer[1,256], W: Buffer[20,256], B: Buffer[1,20], Out: Buffer[1,20]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 1):
+    for j in range(0, 20):
+      acc[0] = 0
+      for k in range(0, 256):  // reduction
+        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
+      acc[0] = (acc[0] + B[0, j])
+      Out[i, j] = acc[0]
+}
+
+
+════════════════════════════════════════════════════════════
+  Phase 5: Schedule Transformations
+════════════════════════════════════════════════════════════
+  Scheduling fused_dense_bias_sigmoid:
+    split(j, 32) → j_outer, j_inner
+    split(k, 56) → k_outer, k_inner
+    reorder(j_outer, k_outer, j_inner, k_inner)
+    parallel(j_outer)
+  fused_dense_bias: no tiling (loops too small or absent)
+
+  Scheduled TIR:
+@fused_dense_bias_sigmoid(A: Buffer[1,784], W: Buffer[256,784], B: Buffer[1,256], Out: Buffer[1,256]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 1):
+    for j_outer in range(0, 8):  // parallel
+      for j_inner in range(0, 32):
+        acc[0] = 0
+        for k_outer in range(0, 14):  // reduction
+          for k_inner in range(0, 56):  // reduction
+            acc[0] = (acc[0] + (A[i, ((k_outer * 56) + k_inner)] * W[((j_outer * 32) + j_inner), ((k_outer * 56) + k_inner)]))
+        acc[0] = (acc[0] + B[0, ((j_outer * 32) + j_inner)])
+        Out[i, ((j_outer * 32) + j_inner)] = (1 / (1 + Math.exp((0 - acc[0]))))
+}
+
+@fused_dense_bias(A: Buffer[1,256], W: Buffer[20,256], B: Buffer[1,20], Out: Buffer[1,20]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 1):
+    for j in range(0, 20):
+      acc[0] = 0
+      for k in range(0, 256):  // reduction
+        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
+      acc[0] = (acc[0] + B[0, j])
+      Out[i, j] = acc[0]
+}
+
+
+════════════════════════════════════════════════════════════
+  Phase 6: Auto-Tuning (Search Best Schedule)
+════════════════════════════════════════════════════════════
+  [Skipped — pass runAutoTune=true to enable]
+  In production MLC, this phase searches ~1000-100000 configs
+  using cost models (XGBoost) + evolutionary search.
+
+════════════════════════════════════════════════════════════
+  Phase 7: Code Generation (→ JavaScript)
+════════════════════════════════════════════════════════════
+
+── Naive (unoptimized) code ──
+function fused_dense_bias_sigmoid(A, W, B, Out) {
+  // Buffer shapes:
+  // A: [1, 784] (global)
+  // W: [256, 784] (global)
+  // B: [1, 256] (global)
+  // Out: [1, 256] (global)
+  
+  const acc = new Float32Array(1); // local
+  
+  for (let i = 0; i < 1; i++) {
+    for (let j = 0; j < 256; j++) {
+      acc[0] = 0;
+      for (let k = 0; k < 784; k++) {
+        acc[0] = (acc[0] + (A[i * 784 + k] * W[j * 784 + k]));
+      }
+      acc[0] = (acc[0] + B[0 * 256 + j]);
+      Out[i * 256 + j] = (1 / (1 + Math.exp((0 - acc[0]))));
+    }
+  }
+}
+
+function fused_dense_bias(A, W, B, Out) {
+  // Buffer shapes:
+  // A: [1, 256] (global)
+  // W: [20, 256] (global)
+  // B: [1, 20] (global)
+  // Out: [1, 20] (global)
+  
+  const acc = new Float32Array(1); // local
+  
+  for (let i = 0; i < 1; i++) {
+    for (let j = 0; j < 20; j++) {
+      acc[0] = 0;
+      for (let k = 0; k < 256; k++) {
+        acc[0] = (acc[0] + (A[i * 256 + k] * W[j * 256 + k]));
+      }
+      acc[0] = (acc[0] + B[0 * 20 + j]);
+      Out[i * 20 + j] = acc[0];
+    }
+  }
+}
+
+
+── Scheduled (optimized) code ──
+function fused_dense_bias_sigmoid(A, W, B, Out) {
+  // Buffer shapes:
+  // A: [1, 784] (global)
+  // W: [256, 784] (global)
+  // B: [1, 256] (global)
+  // Out: [1, 256] (global)
+  
+  const acc = new Float32Array(1); // local
+  
+  for (let i = 0; i < 1; i++) {
+    for (let j_outer = 0; j_outer < 8; j_outer++) { /* parallel */
+      for (let j_inner = 0; j_inner < 32; j_inner++) {
+        acc[0] = 0;
+        for (let k_outer = 0; k_outer < 14; k_outer++) {
+          for (let k_inner = 0; k_inner < 56; k_inner++) {
+            acc[0] = (acc[0] + (A[i * 784 + ((k_outer * 56) + k_inner)] * W[((j_outer * 32) + j_inner) * 784 + ((k_outer * 56) + k_inner)]));
+          }
+        }
+        acc[0] = (acc[0] + B[0 * 256 + ((j_outer * 32) + j_inner)]);
+        Out[i * 256 + ((j_outer * 32) + j_inner)] = (1 / (1 + Math.exp((0 - acc[0]))));
+      }
+    }
+  }
+}
+
+function fused_dense_bias(A, W, B, Out) {
+  // Buffer shapes:
+  // A: [1, 256] (global)
+  // W: [20, 256] (global)
+  // B: [1, 20] (global)
+  // Out: [1, 20] (global)
+  
+  const acc = new Float32Array(1); // local
+  
+  for (let i = 0; i < 1; i++) {
+    for (let j = 0; j < 20; j++) {
+      acc[0] = 0;
+      for (let k = 0; k < 256; k++) {
+        acc[0] = (acc[0] + (A[i * 256 + k] * W[j * 256 + k]));
+      }
+      acc[0] = (acc[0] + B[0 * 20 + j]);
+      Out[i * 20 + j] = acc[0];
+    }
+  }
+}
+
+
+════════════════════════════════════════════════════════════
+  VERIFICATION
+════════════════════════════════════════════════════════════
+
+── Compiled Forward Verification ──
+  NDArray naive result: [-0.42602306604385376, 0.6736059784889221, -0.7845359444618225, -0.77457195520401, 1.9041868448257446...]
+  Compiled naive match: ✓
+  Compiled scheduled match: ✓
+
+── Benchmark ──
+  NDArray naive:       0.9563ms / inference
+  Compiled naive:      0.8901ms / inference
+    Speedup vs NDArray: 1.1x
+  Compiled scheduled:  0.8797ms / inference
+    Speedup vs NDArray: 1.1x
+
+── Autograd Training Verification ──
+  Training multilabel classifier for 5 steps...
+    Step 0: loss=0.823897 grads=✓
+    Step 1: loss=0.808513 grads=✓
+    Step 2: loss=0.793459 grads=✓
+    Step 3: loss=0.778729 grads=✓
+    Step 4: loss=0.764318 grads=✓
+  Loss changing: ✓ (0.8239 → 0.7643)
+
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+▓  GRADIENT CHECK (Finite Difference Verification)
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+    idx=0 num=-2.4308e-2 ana=-2.4311e-2 err=7.5550e-5
+    idx=1 num=-1.0179e-1 ana=-1.0182e-1 err=1.1969e-4
+    idx=2 num=9.0525e-3 ana=9.0524e-3 err=4.0638e-6
+    idx=3 num=-1.0336e-1 ana=-1.0337e-1 err=6.4944e-5
+    idx=4 num=-2.4326e-2 ana=-2.4311e-2 err=3.0745e-4
+    idx=5 num=-1.0185e-1 ana=-1.0182e-1 err=1.5471e-4
+    idx=6 num=9.0525e-3 ana=9.0524e-3 err=4.0638e-6
+    idx=7 num=-1.0338e-1 ana=-1.0337e-1 err=2.5154e-5
+    idx=8 num=0.0000e+0 ana=0.0000e+0 err=0.0000e+0
+    idx=9 num=0.0000e+0 ana=0.0000e+0 err=0.0000e+0
+    idx=10 num=0.0000e+0 ana=0.0000e+0 err=0.0000e+0
+    idx=11 num=0.0000e+0 ana=0.0000e+0 err=0.0000e+0
+  Max relative error: 3.0745e-4
+  Gradient check: ✓ PASS (threshold 5e-2 for FP32)
+
+══════════════════════════════════════════════════════════════════════
+  DONE — All phases completed for all classifier types
+══════════════════════════════════════════════════════════════════════

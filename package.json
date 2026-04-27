@@ -1,0 +1,14 @@
+{
+  "name": "mini-mlc",
+  "version": "1.0.0",
+  "description": "Mini MLC (Machine Learning Compilation) framework in TypeScript — educational",
+  "type": "module",
+  "scripts": {
+    "start": "npx tsx src/main.ts",
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "tsx": "^4.7.0"
+  }
+}
