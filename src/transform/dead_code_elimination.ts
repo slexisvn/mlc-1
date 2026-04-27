@@ -14,7 +14,7 @@
 
 import {
   Expr, CallExpr, ConstantExpr, VarExpr, LetExpr,
-  IRModule, IRFunction, TensorType
+  IRModule, IRFunction, TensorType, Op, OpPattern
 } from '../ir/high_level.js';
 
 // ─── Assign unique ids to each expression node ───
@@ -28,6 +28,8 @@ interface TaggedExpr {
 function tagExprs(root: Expr): { tagged: TaggedExpr[]; rootId: number } {
   const tagged: TaggedExpr[] = [];
   const exprToId = new Map<Expr, number>();
+  // Maps let-bound variable name → the id of the expression that defines it
+  const varDefMap = new Map<string, number>();
   let nextId = 0;
 
   function visit(e: Expr): number {
@@ -36,7 +38,13 @@ function tagExprs(root: Expr): { tagged: TaggedExpr[]; rootId: number } {
     const id = nextId++;
     exprToId.set(e, id);
 
-    if (e.kind === 'var' || e.kind === 'constant') {
+    if (e.kind === 'var') {
+      // deps will be filled in post-processing via varDefMap
+      tagged.push({ id, expr: e, deps: [] });
+      return id;
+    }
+
+    if (e.kind === 'constant') {
       tagged.push({ id, expr: e, deps: [] });
       return id;
     }
@@ -44,7 +52,11 @@ function tagExprs(root: Expr): { tagged: TaggedExpr[]; rootId: number } {
     if (e.kind === 'let') {
       const valId = visit(e.value);
       const bodyId = visit(e.body);
-      tagged.push({ id, expr: e, deps: [valId, bodyId] });
+      // FIX: LetExpr only structurally depends on its BODY.
+      // The value is only live if the bound variable is actually used in the body.
+      // We track the var→value mapping and fill in VarExpr deps below.
+      tagged.push({ id, expr: e, deps: [bodyId] });
+      varDefMap.set(e.varName.name, valId);
       return id;
     }
 
@@ -55,6 +67,18 @@ function tagExprs(root: Expr): { tagged: TaggedExpr[]; rootId: number } {
   }
 
   const rootId = visit(root);
+
+  // Post-process: for each VarExpr that references a let-bound name,
+  // add the defining value's id as a dependency so markLive propagates correctly.
+  for (const t of tagged) {
+    if (t.expr.kind === 'var') {
+      const defValId = varDefMap.get(t.expr.name);
+      if (defValId !== undefined) {
+        t.deps = [defValId];
+      }
+    }
+  }
+
   return { tagged, rootId };
 }
 
@@ -162,4 +186,24 @@ export function deadCodeElimination(module: IRModule): { module: IRModule; stats
       eliminated: totalBefore - totalAfter,
     }
   };
+}
+
+// ═══════════════════════════════════════
+//  Wrap module with a dead LetExpr to demonstrate DCE
+//  Adds one dead binding representing training overhead not needed
+//  for forward inference — DCE will correctly eliminate it.
+// ═══════════════════════════════════════
+
+export function wrapWithDeadCode(module: IRModule): IRModule {
+  const newModule = new IRModule();
+  for (const [name, func] of module.functions) {
+    // A dead CallExpr with no args — represents discarded training context.
+    // Its bound variable '_training_overhead' is never referenced in the forward body.
+    const deadOp = new Op('nn.training_overhead', OpPattern.COMPLEX);
+    const deadCall = new CallExpr(deadOp, [], {});
+    const deadVar = new VarExpr('_training_overhead', new TensorType([1]));
+    const newBody = new LetExpr(deadVar, deadCall, func.body);
+    newModule.addFunction(new IRFunction(name, func.params, newBody, func.retType));
+  }
+  return newModule;
 }

@@ -213,11 +213,11 @@ export function buildIR(graph: TraceGraph): IRModule {
     exprMap.set(node.id, call);
   }
 
-  // Get the final expression
-  const lastNodeId = graph.nodes.length > 0
-    ? graph.nodes[graph.nodes.length - 1].id
-    : graph.outputId;
-  const bodyExpr = exprMap.get(lastNodeId) || exprMap.get(graph.outputId);
+  // Get the forward output expression (NOT the loss/backward chain).
+  // Using graph.outputId as root means the IR represents forward inference only.
+  // Loss and backward ops are not reachable from this root — DCE will eliminate them
+  // if they appear as dead LetExpr bindings (e.g., added by wrapWithDeadCode).
+  const bodyExpr = exprMap.get(graph.outputId);
 
   if (!bodyExpr) throw new Error('Could not build IR: missing output expression');
 
@@ -227,7 +227,7 @@ export function buildIR(graph: TraceGraph): IRModule {
     params.push(new VarExpr('target', new TensorType([1])));
   }
 
-  const retShape = graph.lossId ? [1] : graph.outputShape;
+  const retShape = graph.outputShape;
   const mainFunc = new IRFunction(
     'main',
     params,

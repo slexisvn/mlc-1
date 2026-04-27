@@ -8,8 +8,9 @@
 import {
   PrimFunc, ForNode, SeqNode, BufferStoreNode, AllocNode,
   LoopVar, LoopAnnotation,
+  BufferDecl, BufferLoadExpr, BinOpExpr, MaxExpr, MinExpr, CallExprTIR,
   VarIndex, ConstIndex, BinOpIndex,
-  VarRefExpr, BinOpExpr,
+  VarRefExpr,
   type Stmt, type IndexExpr, type ValueExpr,
   cloneStmt
 } from '../ir/low_level.js';
@@ -173,6 +174,86 @@ export class Schedule {
     this.rebuildLoopMap();
   }
 
+  // ─── CACHE READ ───
+  // Creates a local copy (tile) of a buffer inside an outer loop,
+  // improving cache locality by ensuring the tile fits in L1 cache.
+  //
+  // cacheRead('W', j_outer, tileSize):
+  //   Inside j_outer, prepend:
+  //     for _jl in [0, tileSize): for _kl in [0, K):
+  //       W_local[_jl, _kl] = W[j_outer * tileSize + _jl, _kl]
+  //   Then replace load(W, [j_outer*tileSize+j_inner, k]) → load(W_local, [j_inner, k])
+  cacheRead(bufName: string, atLoopVar: LoopVar, tileSize: number): BufferDecl {
+    const outerFor = this.loopMap.get(atLoopVar.name);
+    if (!outerFor) throw new Error(`Loop '${atLoopVar.name}' not found`);
+
+    const wBuf = this.func.params.find(p => p.name === bufName);
+    if (!wBuf || wBuf.shape.length < 2) {
+      throw new Error(`Buffer '${bufName}' not found or has wrong rank`);
+    }
+
+    const K = wBuf.shape[1];
+    const wLocal = new BufferDecl(`${bufName}_local`, [tileSize, K], 'local');
+
+    // Helper: inner loop var name is outerVar_name + '_inner'
+    const innerVarName = `${atLoopVar.name}_inner`;
+
+    // ─── Build packing stage (inside atLoopVar) ───
+    const jlVar = new LoopVar('_jl_cr', 'spatial');
+    const klVar = new LoopVar('_kl_cr', 'spatial');
+    const packStmt: Stmt = new ForNode(jlVar, 0, tileSize,
+      new ForNode(klVar, 0, K,
+        new BufferStoreNode(wLocal,
+          [new VarIndex(jlVar), new VarIndex(klVar)],
+          new BufferLoadExpr(wBuf, [
+            new BinOpIndex('+',
+              new BinOpIndex('*', new VarIndex(atLoopVar), new ConstIndex(tileSize)),
+              new VarIndex(jlVar)
+            ),
+            new VarIndex(klVar)
+          ])
+        )
+      )
+    );
+
+    // ─── Rewrite W loads in the outer loop's body ───
+    const newBody = this.rewriteBufferToLocal(
+      outerFor.body, bufName, wLocal, atLoopVar.name, innerVarName, tileSize
+    );
+
+    // ─── Assemble: [packing, main] inside outer loop ───
+    const newOuterBody = new SeqNode([packStmt, newBody]);
+    this.replaceForNode(atLoopVar.name,
+      new ForNode(outerFor.loopVar, outerFor.min, outerFor.extent,
+        newOuterBody, outerFor.annotation)
+    );
+
+    this.func.allocations = [...this.func.allocations, wLocal];
+    this.rebuildLoopMap();
+    return wLocal;
+  }
+
+  // ─── RFACTOR (simplified) ───
+  // Splits a reduction loop into (k_outer [parallel], k_inner),
+  // enabling parallel execution of the reduction.
+  // Note: this is a simplified version — full rfactor also creates
+  // partial sum buffers and a final merge loop.
+  rfactor(reductionLoopVar: LoopVar, numParts: number): [LoopVar, LoopVar] {
+    const kFor = this.loopMap.get(reductionLoopVar.name);
+    if (!kFor) throw new Error(`Loop '${reductionLoopVar.name}' not found`);
+    const kPart = Math.ceil(kFor.extent / numParts);
+    const [kOuter, kInner] = this.split(reductionLoopVar, kPart);
+    this.annotate(kOuter.name, 'parallel');
+    return [kOuter, kInner];
+  }
+
+  // ─── COMPUTE AT (stub) ───
+  // Moves a producer stage inside a consumer's loop nest.
+  // Full implementation requires producer-consumer dependency analysis.
+  computeAt(_producerBuf: string, _consumerLoop: LoopVar): void {
+    // Stub — not implemented in this simplified version
+  }
+
   // ─── BUILD: return transformed PrimFunc ───
 
   build(): PrimFunc {
@@ -304,6 +385,111 @@ export class Schedule {
     // Similar rewrite but: outer = fused / innerExtent, inner = fused % innerExtent
     // For simplicity, we just annotate this conceptually
     return stmt;
+  }
+
+  // ─── Helper: rewrite buffer loads from global buf → local tile ───
+  // Matches pattern: load(bufName, [(outer * tileSize + inner), k_expr])
+  // Replaces with:   load(local, [inner_var, k_expr])
+  private rewriteBufferToLocal(
+    stmt: Stmt,
+    bufName: string,
+    wLocal: BufferDecl,
+    outerVarName: string,
+    innerVarName: string,
+    tileSize: number
+  ): Stmt {
+    if (stmt instanceof ForNode) {
+      return new ForNode(stmt.loopVar, stmt.min, stmt.extent,
+        this.rewriteBufferToLocal(stmt.body, bufName, wLocal, outerVarName, innerVarName, tileSize),
+        stmt.annotation
+      );
+    }
+    if (stmt instanceof SeqNode) {
+      return new SeqNode(stmt.stmts.map(s =>
+        this.rewriteBufferToLocal(s, bufName, wLocal, outerVarName, innerVarName, tileSize)
+      ));
+    }
+    if (stmt instanceof BufferStoreNode) {
+      return new BufferStoreNode(stmt.buffer, stmt.indices,
+        this.rewriteValueToLocal(stmt.value, bufName, wLocal, outerVarName, innerVarName, tileSize)
+      );
+    }
+    if (stmt instanceof AllocNode) {
+      return new AllocNode(stmt.buffer,
+        this.rewriteBufferToLocal(stmt.body, bufName, wLocal, outerVarName, innerVarName, tileSize)
+      );
+    }
+    return stmt;
+  }
+
+  private rewriteValueToLocal(
+    val: ValueExpr,
+    bufName: string,
+    wLocal: BufferDecl,
+    outerVarName: string,
+    innerVarName: string,
+    tileSize: number
+  ): ValueExpr {
+    if (val.kind === 'load') {
+      const v = val as BufferLoadExpr;
+      if (v.buffer.name === bufName && v.indices.length === 2) {
+        const idx0 = v.indices[0];
+        if (this.matchSplitPattern(idx0, outerVarName, innerVarName, tileSize)) {
+          // Replace W[j_outer*tile+j_inner, k] → W_local[j_inner, k]
+          const innerIdx = this.extractInner(idx0);
+          return new BufferLoadExpr(wLocal, [innerIdx, v.indices[1]]);
+        }
+      }
+      return val;
+    }
+    if (val.kind === 'binop') {
+      const v = val as BinOpExpr;
+      return new BinOpExpr(v.op,
+        this.rewriteValueToLocal(v.left, bufName, wLocal, outerVarName, innerVarName, tileSize),
+        this.rewriteValueToLocal(v.right, bufName, wLocal, outerVarName, innerVarName, tileSize)
+      );
+    }
+    if (val.kind === 'max') {
+      const v = val as MaxExpr;
+      return new MaxExpr(
+        this.rewriteValueToLocal(v.left, bufName, wLocal, outerVarName, innerVarName, tileSize),
+        this.rewriteValueToLocal(v.right, bufName, wLocal, outerVarName, innerVarName, tileSize)
+      );
+    }
+    if (val.kind === 'min') {
+      const v = val as MinExpr;
+      return new MinExpr(
+        this.rewriteValueToLocal(v.left, bufName, wLocal, outerVarName, innerVarName, tileSize),
+        this.rewriteValueToLocal(v.right, bufName, wLocal, outerVarName, innerVarName, tileSize)
+      );
+    }
+    if (val.kind === 'call') {
+      const v = val as CallExprTIR;
+      return new CallExprTIR(v.funcName,
+        v.args.map(a => this.rewriteValueToLocal(a, bufName, wLocal, outerVarName, innerVarName, tileSize))
+      );
+    }
+    return val;
+  }
+
+  // Detect: (outer * tileSize + inner) pattern in index expression
+  private matchSplitPattern(
+    idx: IndexExpr, outerName: string, innerName: string, factor: number
+  ): boolean {
+    if (!(idx instanceof BinOpIndex) || idx.op !== '+') return false;
+    const left = idx.left;
+    const right = idx.right;
+    if (!(left instanceof BinOpIndex) || left.op !== '*') return false;
+    if (!(left.left instanceof VarIndex) || left.left.loopVar.name !== outerName) return false;
+    if (!(left.right instanceof ConstIndex) || left.right.value !== factor) return false;
+    if (!(right instanceof VarIndex) || right.loopVar.name !== innerName) return false;
+    return true;
+  }
+
+  // Extract the inner part from (outer * factor + inner)
+  private extractInner(idx: IndexExpr): IndexExpr {
+    if (idx instanceof BinOpIndex && idx.op === '+') return idx.right;
+    return idx;
   }
 }
 

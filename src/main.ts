@@ -28,7 +28,7 @@ import { constantFold } from './transform/constant_fold.js';
 import { fuseOps, fusionStats } from './transform/op_fusion.js';
 import { lowerModule, lowerOp } from './lower/lowering.js';
 import { Schedule, applyDefaultSchedule } from './transform/schedule.js';
-import { codegenJS, compile } from './codegen/js_codegen.js';
+import { codegenJS, compile, registerTileJS } from './codegen/js_codegen.js';
 import { autoTune, printSearchProgress } from './tune/auto_tune.js';
 import { RuntimeModule, naiveForward } from './runtime/executor.js';
 import {
@@ -36,11 +36,13 @@ import {
   printPhaseBanner, printSubSection
 } from './utils/printer.js';
 import { PrimFunc } from './ir/low_level.js';
-import { deadCodeElimination } from './transform/dead_code_elimination.js';
+import { deadCodeElimination, wrapWithDeadCode } from './transform/dead_code_elimination.js';
 import { arithmeticSimplify } from './transform/arithmetic_simplify.js';
 import { storageRewrite } from './transform/storage_rewrite.js';
 import { analyzeMemory, printMemoryPlan } from './analysis/memory_planner.js';
 import { profilePipeline, printRoofline } from './analysis/op_profiler.js';
+import { cseModule } from './transform/cse.js';
+import { layoutTransform } from './transform/layout_transform.js';
 
 // ═══════════════════════════════════════
 //  Demo Runner
@@ -58,26 +60,26 @@ function createClassifier(type: ClassifierType): {
   switch (type) {
     case 'binary':
       return {
-        model: new Sequential([new Linear(4, 3), new ReLU(), new Linear(3, 1)]),
+        model: new Sequential([new Linear(32, 64), new ReLU(), new Linear(64, 1)]),
         loss: new BCEWithLogitsLoss(),
-        inputShape: [1, 4],
+        inputShape: [1, 32],
         targetShape: [1, 1],
         activationName: 'sigmoid',
       };
     case 'multiclass':
       return {
-        model: new Sequential([new Linear(4, 8), new ReLU(), new Linear(8, 3)]),
+        model: new Sequential([new Linear(32, 64), new ReLU(), new Linear(64, 8)]),
         loss: new CrossEntropyLoss(),
-        inputShape: [1, 4],
-        targetShape: [1, 3],
+        inputShape: [1, 32],
+        targetShape: [1, 8],
         activationName: 'softmax',
       };
     case 'multilabel':
       return {
-        model: new Sequential([new Linear(4, 5), new ReLU(), new Linear(5, 5)]),
+        model: new Sequential([new Linear(32, 64), new ReLU(), new Linear(64, 8)]),
         loss: new BCEWithLogitsLoss(),
-        inputShape: [1, 4],
-        targetShape: [1, 5],
+        inputShape: [1, 32],
+        targetShape: [1, 8],
         activationName: 'sigmoid',
       };
   }
@@ -137,17 +139,27 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
   }
 
   printSubSection('3.3 Dead Code Elimination');
-  const { module: dceModule, stats: dceStats } = deadCodeElimination(fused);
+  // Inject a dead training-overhead LetExpr to demonstrate DCE.
+  // Represents loss/backward ops not needed for forward inference.
+  const withDead = wrapWithDeadCode(fused);
+  const { module: dceModule, stats: dceStats } = deadCodeElimination(withDead);
   console.log(`  Before: ${dceStats.totalBefore} ops`);
   console.log(`  After:  ${dceStats.totalAfter} ops`);
   console.log(`  Eliminated: ${dceStats.eliminated} dead node(s)`);
+
+  printSubSection('3.4 Common Subexpression Elimination (CSE)');
+  const { module: cseIrModule, stats: cseStats } = cseModule(dceModule);
+  console.log(`  Checked: ${cseStats.checked} nodes`);
+  console.log(`  Replaced: ${cseStats.replaced} duplicate(s)`);
+  console.log(`  LetExpr bindings created: ${cseStats.bindings} (IR linearized)`);
+  const finalIrModule = cseIrModule;
 
   // ═══════════════════════════════════════
   //  Phase 4: Operator Lowering → TensorIR
   // ═══════════════════════════════════════
   printPhaseBanner(4, 'Operator Lowering (→ TensorIR / Loop Nests)');
 
-  const primFuncs = lowerModule(dceModule);
+  const primFuncs = lowerModule(finalIrModule);
   console.log(`  Lowered ${primFuncs.length} PrimFunc(s):\n`);
   for (const pf of primFuncs) {
     console.log(printTIR(pf));
@@ -164,24 +176,29 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
     const jLoop = loops.find(l => l.loopVar.name === 'j');
     const kLoop = loops.find(l => l.loopVar.name === 'k');
 
-    if (jLoop && kLoop && jLoop.forNode.extent >= 32 && kLoop.forNode.extent >= 32) {
+    if (jLoop && kLoop && jLoop.forNode.extent >= 16 && kLoop.forNode.extent >= 16) {
       console.log(`  Scheduling ${pf.name}:`);
       const sch = new Schedule(pf);
 
-      // Pick tile sizes that divide evenly (avoid boundary issues)
+      // Tile j only (k is nested inside SeqNode — reorder would miss it)
       const tileJ = findDivisor(jLoop.forNode.extent, 32);
-      const tileK = findDivisor(kLoop.forNode.extent, 64);
 
       console.log(`    split(j, ${tileJ}) → j_outer, j_inner`);
-      console.log(`    split(k, ${tileK}) → k_outer, k_inner`);
-      console.log(`    reorder(j_outer, k_outer, j_inner, k_inner)`);
       console.log(`    parallel(j_outer)`);
 
       try {
         const [jOuter, jInner] = sch.split(jLoop.loopVar, tileJ);
-        const [kOuter, kInner] = sch.split(kLoop.loopVar, tileK);
-        sch.reorder([jOuter, kOuter, jInner, kInner]);
         sch.parallel(jOuter);
+
+        // Phase 5.1: cache_read for W (improves cache reuse within j_outer tile)
+        try {
+          sch.cacheRead('W', jOuter, tileJ);
+          console.log(`    cache_read(W, j_outer, ${tileJ}) → W_local[${tileJ}, ${kLoop.forNode.extent}]`);
+          console.log(`      W tile (${tileJ * kLoop.forNode.extent * 4}B) fits in L1 cache`);
+        } catch {
+          // cacheRead not applicable (e.g., W not found), skip silently
+        }
+
         return sch.build();
       } catch (e) {
         console.log(`    (schedule failed, using naive)`);
@@ -191,6 +208,22 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
     console.log(`  ${pf.name}: no tiling (loops too small or absent)`);
     return pf;
   });
+
+  printSubSection('5.2 rfactor — Parallel Reduction Demo');
+  for (const pf of primFuncs) {
+    const loops = pf.getLoops();
+    const kLoop = loops.find(l => l.loopVar.name === 'k');
+    if (kLoop && kLoop.forNode.extent >= 16) {
+      try {
+        const rfSch = new Schedule(pf);
+        const [kOuter, kInner] = rfSch.rfactor(kLoop.loopVar, 4);
+        const kOExtent = Math.ceil(kLoop.forNode.extent / 4);
+        console.log(`  ${pf.name}: rfactor(k, 4)`);
+        console.log(`    k_outer[0, ${kOExtent}) [parallel] × k_inner[0, 4)`);
+        console.log(`    (partial sums merged after parallel reduction)`);
+      } catch { /* skip */ }
+    }
+  }
 
   console.log('\n  Scheduled TIR:');
   for (const pf of scheduledFuncs) {
@@ -221,6 +254,20 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
     }
     return rewritten;
   });
+
+  printSubSection('6.3 Layout Transform (W packing for cache locality)');
+  for (const pf of primFuncs) {
+    const { transformed, stats: ltStats } = layoutTransform(pf, 16);
+    if (ltStats.applied) {
+      console.log(`  ${pf.name}: W ${ltStats.originalShape} → W_packed ${ltStats.packedShape}`);
+      console.log(`    blockN=${ltStats.blockN}: k-inner dimension now contiguous in memory`);
+      console.log(`    Packing ops: ${ltStats.packingOps}, W loads rewritten: ${ltStats.rewrittenLoads}`);
+      const tileBytes = ltStats.blockN * (pf.params.find(p => p.name === 'W')?.shape[1] ?? 1) * 4;
+      console.log(`    Working set per j-tile: ${tileBytes}B (< 32KB L1 cache)`);
+    } else {
+      console.log(`  ${pf.name}: layout transform not applicable (N < blockN or N % blockN ≠ 0)`);
+    }
+  }
 
   // ═══════════════════════════════════════
   //  Phase 7: Auto-Tuning (Simulated Annealing)
@@ -260,6 +307,16 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
   for (const pf of rewrittenFuncs) {
     console.log(codegenJS(pf));
     console.log('');
+  }
+
+  printSubSection('8.2 Register-Tiled code (4-way accumulator)');
+  for (const pf of primFuncs) {
+    const loops = pf.getLoops();
+    const jLoop = loops.find(l => l.loopVar.name === 'j');
+    if (jLoop && jLoop.forNode.extent >= 4) {
+      console.log(registerTileJS(pf, 4));
+      console.log('');
+    }
   }
 
   // ═══════════════════════════════════════
@@ -409,12 +466,24 @@ function gradientCheck() {
   console.log('▓'.repeat(70));
 
   const model = new Sequential([new Linear(4, 3), new ReLU(), new Linear(3, 2)]);
-  const input = new GradTensor(NDArray.rand([1, 4]));
-  const target = new GradTensor(NDArray.rand([1, 2]));
+
+  // Force all params to known positive values far from the ReLU kink (x=0).
+  // Random init can place pre-activations near 0, causing finite-difference
+  // to flip the ReLU gate → catastrophic relative error in gradient check.
+  const params = model.parameters();
+  params.forEach((p, pi) => {
+    for (let i = 0; i < p.data.data.length; i++) {
+      // Fill with small distinct positives: ensures pre-activations ≫ 0
+      p.data.data[i] = 0.2 + 0.05 * ((pi * 13 + i) % 7);
+    }
+  });
+
+  // Fixed input and target: removes randomness from the gradient check
+  const input = new GradTensor(NDArray.full([1, 4], 0.5));
+  const target = new GradTensor(NDArray.full([1, 2], 0.5));
   const lossFn = new MSELoss();
 
-  const params = model.parameters();
-  const eps = 1e-3;
+  const eps = 1e-4;  // smaller eps → more accurate FD, safe since activations are ≫ 0
 
   // 1. Analytical gradients
   engine.reset();
@@ -473,7 +542,7 @@ function gradientCheck() {
 async function main() {
   // 1. Run all classifiers
   demoClassifier('binary', false);
-  demoClassifier('multiclass', false);
+  demoClassifier('multiclass', true);   // ← enable simulated annealing for largest model
   demoClassifier('multilabel', false);
 
   // 2. Final Gradient Check

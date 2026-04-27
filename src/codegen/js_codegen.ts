@@ -165,6 +165,8 @@ class JSCodeGenerator {
     if (idx instanceof BinOpIndex) {
       const l = this.genIndex(idx.left);
       const r = this.genIndex(idx.right);
+      // Use Math.floor for '/' to ensure integer division in JS
+      if (idx.op === '/') return `Math.floor(${l} / ${r})`;
       return `(${l} ${idx.op} ${r})`;
     }
     return '0';
@@ -239,4 +241,66 @@ export function compile(func: PrimFunc): Function {
     .join('\n');
 
   return new Function(...paramNames, body);
+}
+
+// ═══════════════════════════════════════
+//  Register Tiling Codegen
+//  Generates JS with explicit 4-way accumulator unrolling:
+//    - Loads A[k] once per k iteration
+//    - Accumulates into acc0..acc3 for 4 output elements simultaneously
+//    - Reduces loop overhead 4× and enables instruction-level parallelism
+// ═══════════════════════════════════════
+
+export function registerTileJS(func: PrimFunc, tileSize = 4): string {
+  // Find the spatial j loop (output features) and reduction k loop
+  const loops = func.getLoops();
+  const jLoop = loops.find(l => l.loopVar.name === 'j');
+  const kLoop = loops.find(l => l.loopVar.name === 'k');
+
+  if (!jLoop || !kLoop || jLoop.forNode.extent % tileSize !== 0) {
+    return `// register tiling not applicable to ${func.name}\n` + codegenJS(func);
+  }
+
+  const M = 1; // batch size
+  const N = jLoop.forNode.extent;
+  const K = kLoop.forNode.extent;
+  const wBuf = func.params.find(p => p.name === 'W');
+  const aBuf = func.params.find(p => p.name === 'A');
+  const bBuf = func.params.find(p => p.name === 'B');
+  const outBuf = func.params.find(p => p.name === 'Out');
+
+  if (!wBuf || !aBuf || !outBuf) {
+    return `// register tiling: missing A/W/Out buffers in ${func.name}\n` + codegenJS(func);
+  }
+
+  const hasAct = func.name.includes('relu');
+  const accNames = Array.from({ length: tileSize }, (_, t) => `acc${t}`);
+  const lines: string[] = [];
+
+  lines.push(`function ${func.name}_reg${tileSize}(${func.params.map(p => p.name).join(', ')}) {`);
+  lines.push(`  // Register-tiled: ${tileSize}-way accumulator unrolling`);
+  lines.push(`  // Loads A[k] once, reuses for ${tileSize} output elements → ${tileSize}× fewer A reads`);
+  lines.push(`  for (let i = 0; i < ${M}; i++) {`);
+  lines.push(`    for (let j = 0; j < ${N}; j += ${tileSize}) {`);
+  lines.push(`      let ${accNames.join(' = ')} = 0;`);
+  lines.push(`      for (let k = 0; k < ${K}; k++) {`);
+  lines.push(`        const a = A[i * ${K} + k]; // load once, reuse ${tileSize}x`);
+  for (let t = 0; t < tileSize; t++) {
+    lines.push(`        acc${t} += a * W[(j + ${t}) * ${K} + k];`);
+  }
+  lines.push(`      }`);
+  if (bBuf) {
+    for (let t = 0; t < tileSize; t++) {
+      lines.push(`      acc${t} += B[j + ${t}];`);
+    }
+  }
+  for (let t = 0; t < tileSize; t++) {
+    const store = hasAct ? `Math.max(acc${t}, 0)` : `acc${t}`;
+    lines.push(`      Out[i * ${N} + j + ${t}] = ${store};`);
+  }
+  lines.push(`    }`);
+  lines.push(`  }`);
+  lines.push(`}`);
+
+  return lines.join('\n');
 }
