@@ -177,25 +177,25 @@ Parameters: 4
 }
 
 ── 5.3 compute_inline — Eliminate Intermediate Buffer ──
-  Producer (bias_add):  4×1 matrix, adds B[0,j] to each row
-    @bias_add(A[4,1], B[1,1], BiasOut[4,1]):
+  Producer (bias_add):  4×64 matrix, adds B[0,j] to each row
+    @bias_add(A[4,64], B[1,64], BiasOut[4,64]):
       for i in range(0, 4):
-        for j in range(0, 1):
+        for j in range(0, 64):
           BiasOut[i,j] = (A[i,j]+B[0,j])
 
   Consumer (relu):      max(BiasOut[i,j], 0)
-    @relu(BiasOut[4,1], Out[4,1]):
+    @relu(BiasOut[4,64], Out[4,64]):
       for i in range(0, 4):
-        for j in range(0, 1):
+        for j in range(0, 64):
           Out[i,j] = max(BiasOut[i,j],0)
 
   After computeInline(bias_add → relu):
     Substituted 1 load site(s)
-    Intermediate buffer 'BiasOut[4,1]' eliminated
+    Intermediate buffer 'BiasOut[4,64]' eliminated
     Merged kernel 'bias_add_inlined_into_relu':
-    @bias_add_inlined_into_relu(Out[4,1], A[4,1], B[1,1]):
+    @bias_add_inlined_into_relu(Out[4,64], A[4,64], B[1,64]):
       for i in range(0, 4):
-        for j in range(0, 1):
+        for j in range(0, 64):
           Out[i,j] = max((A[i,j]+B[0,j]),0)
 
 
@@ -228,84 +228,84 @@ Parameters: 4
     Search space: 3×7×6×2(unroll)×2(W_local) = 504 configs
     Strategy: 3 restarts × 50 iterations
     Cooling: T₀=1, rate=0.92
-    Naive baseline: 0.0112ms
-    Restart 1: best=0.0069ms [tile(i=4,j=8,k=4)]
-    Restart 2: best=0.0084ms [tile(i=1,j=32,k=2)]
-    Restart 3: best=0.0069ms [tile(i=4,j=64,k=4)]
+    Naive baseline: 0.0155ms
+    Restart 1: best=0.0070ms [tile(i=2,j=4,k=4)]
+    Restart 2: best=0.0068ms [tile(i=2,j=32,k=4)+unroll]
+    Restart 3: best=0.0074ms [tile(i=4,j=64,k=4)+unroll]
     ───────────────────────────────
-    Best overall: 0.0069ms [tile(i=4,j=64,k=4)]
-    Speedup vs naive: 1.62x
+    Best overall: 0.0068ms [tile(i=2,j=32,k=4)+unroll]
+    Speedup vs naive: 2.28x
 Search Progress:
-  [  0] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0106ms  T=1.000  acc=5/7
-  [  7] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0097ms  T=0.558  acc=4/7
-  [ 14] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0084ms  T=0.311  acc=3/7
-  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0084ms  T=0.174  acc=1/7
-  [ 28] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0084ms  T=0.097  acc=1/7
-  [ 35] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0084ms  T=0.054  acc=0/7
-  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.030  acc=3/7
-  [ 49] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.017  acc=5/7
-  [ 56] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.606  acc=4/7
-  [ 63] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.338  acc=3/7
-  [ 70] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.189  acc=5/7
-  [ 77] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.105  acc=4/7
-  [ 84] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.059  acc=4/7
-  [ 91] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.033  acc=2/7
-  [ 98] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.018  acc=6/7
-  [105] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.659  acc=4/7
-  [112] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.368  acc=6/7
-  [119] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.205  acc=3/7
-  [126] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.114  acc=2/7
-  [133] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.064  acc=3/7
-  [140] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.036  acc=3/7
-  [147] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0069ms  T=0.020  acc=0/3
+  [  0] ▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0070ms  T=1.000  acc=3/7
+  [  7] ▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0070ms  T=0.558  acc=1/7
+  [ 14] ▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0070ms  T=0.311  acc=3/7
+  [ 21] ▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0070ms  T=0.174  acc=1/7
+  [ 28] ▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0070ms  T=0.097  acc=1/7
+  [ 35] ▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0070ms  T=0.054  acc=3/7
+  [ 42] ▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0070ms  T=0.030  acc=3/7
+  [ 49] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.017  acc=6/7
+  [ 56] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.606  acc=5/7
+  [ 63] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.338  acc=3/7
+  [ 70] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.189  acc=3/7
+  [ 77] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.105  acc=2/7
+  [ 84] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.059  acc=5/7
+  [ 91] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.033  acc=3/7
+  [ 98] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.018  acc=4/7
+  [105] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.659  acc=5/7
+  [112] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.368  acc=5/7
+  [119] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.205  acc=4/7
+  [126] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.114  acc=4/7
+  [133] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.064  acc=3/7
+  [140] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.036  acc=4/7
+  [147] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.020  acc=2/3
   Auto-tuning fused_dense_bias (simulated annealing)...
     Search space: 3×1×7×2(unroll)×2(W_local) = 84 configs
     Strategy: 3 restarts × 50 iterations
     Cooling: T₀=1, rate=0.92
-    Naive baseline: 0.0005ms
-    Restart 1: best=0.0003ms [tile(i=1,j=1,k=32)+unroll]
-    Restart 2: best=0.0003ms [tile(i=4,j=1,k=64)+unroll]
-    Restart 3: best=0.0003ms [tile(i=4,j=1,k=8)+unroll]
+    Naive baseline: 0.0006ms
+    Restart 1: best=0.0003ms [tile(i=2,j=1,k=4)+unroll]
+    Restart 2: best=0.0003ms [tile(i=1,j=1,k=64)+W_local+unroll]
+    Restart 3: best=0.0003ms [tile(i=1,j=1,k=4)+W_local+unroll]
     ───────────────────────────────
-    Best overall: 0.0003ms [tile(i=1,j=1,k=32)+unroll]
-    Speedup vs naive: 1.67x
+    Best overall: 0.0003ms [tile(i=1,j=1,k=4)+W_local+unroll]
+    Speedup vs naive: 2.00x
 Search Progress:
-  [  0] ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0006ms  T=1.000  acc=6/7
-  [  7] ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0006ms  T=0.558  acc=7/7
-  [ 14] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.311  acc=5/7
-  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.174  acc=3/7
-  [ 28] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.097  acc=3/7
-  [ 35] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.054  acc=5/7
-  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.030  acc=7/7
-  [ 49] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.017  acc=6/7
-  [ 56] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.606  acc=6/7
-  [ 63] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.338  acc=7/7
-  [ 70] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.189  acc=4/7
-  [ 77] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.105  acc=7/7
-  [ 84] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.059  acc=4/7
-  [ 91] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.033  acc=6/7
-  [ 98] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.018  acc=4/7
-  [105] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.659  acc=6/7
-  [112] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.368  acc=6/7
-  [119] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.205  acc=6/7
-  [126] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.114  acc=3/7
-  [133] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.064  acc=4/7
-  [140] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.036  acc=6/7
-  [147] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0003ms  T=0.020  acc=3/3
+  [  0] ▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0006ms  T=1.000  acc=6/7
+  [  7] ▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0006ms  T=0.558  acc=5/7
+  [ 14] ▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0006ms  T=0.311  acc=6/7
+  [ 21] ▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0006ms  T=0.174  acc=6/7
+  [ 28] ▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0006ms  T=0.097  acc=3/7
+  [ 35] ▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0006ms  T=0.054  acc=4/7
+  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.030  acc=2/7
+  [ 49] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.017  acc=6/7
+  [ 56] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.606  acc=7/7
+  [ 63] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.338  acc=6/7
+  [ 70] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.189  acc=7/7
+  [ 77] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.105  acc=6/7
+  [ 84] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.059  acc=7/7
+  [ 91] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.033  acc=4/7
+  [ 98] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.018  acc=6/7
+  [105] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.659  acc=7/7
+  [112] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.368  acc=5/7
+  [119] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.205  acc=5/7
+  [126] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.114  acc=5/7
+  [133] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.064  acc=5/7
+  [140] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.036  acc=4/7
+  [147] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0003ms  T=0.020  acc=2/3
 
 ── 7.1 Tuner-selected TIR → feeds Phase 8 & Phase 9 ──
 @fused_dense_bias_relu(A: Buffer[4,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[4,64]) {
   alloc acc: float32[1]  scope=local
-  for i_outer in range(0, 1):
-    for j_outer in range(0, 1):
-      for i_inner in range(0, 4):
-        for j_inner in range(0, 64):
+  for i_outer in range(0, 2):
+    for j_outer in range(0, 2):
+      for i_inner in range(0, 2):
+        for j_inner in range(0, 32):
           acc[0] = 0
           for k_outer in range(0, 8):  // reduction
             for k_inner in range(0, 4):  // reduction
-              acc[0] = (acc[0] + (A[((i_outer * 4) + i_inner), ((k_outer * 4) + k_inner)] * W[((j_outer * 64) + j_inner), ((k_outer * 4) + k_inner)]))
-          acc[0] = (acc[0] + B[0, ((j_outer * 64) + j_inner)])
-          Out[((i_outer * 4) + i_inner), ((j_outer * 64) + j_inner)] = max(acc[0], 0)
+              acc[0] = (acc[0] + (A[((i_outer * 2) + i_inner), ((k_outer * 4) + k_inner)] * W[((j_outer * 32) + j_inner), ((k_outer * 4) + k_inner)]))
+          acc[0] = (acc[0] + B[0, ((j_outer * 32) + j_inner)])
+          Out[((i_outer * 2) + i_inner), ((j_outer * 32) + j_inner)] = max(acc[0], 0)
 }
 
 @fused_dense_bias(A: Buffer[4,64], W: Buffer[1,64], B: Buffer[1,1], Out: Buffer[4,1]) {
@@ -314,9 +314,9 @@ Search Progress:
     for j_outer in range(0, 1):
       for j_inner in range(0, 1):  // unroll
         acc[0] = 0
-        for k_outer in range(0, 2):  // reduction
-          for k_inner in range(0, 32):  // reduction
-            acc[0] = (acc[0] + (A[i, ((k_outer * 32) + k_inner)] * W[((j_outer * 1) + j_inner), ((k_outer * 32) + k_inner)]))
+        for k_outer in range(0, 16):  // reduction
+          for k_inner in range(0, 4):  // reduction
+            acc[0] = (acc[0] + (A[i, ((k_outer * 4) + k_inner)] * W[((j_outer * 1) + j_inner), ((k_outer * 4) + k_inner)]))
         acc[0] = (acc[0] + B[0, ((j_outer * 1) + j_inner)])
         Out[i, ((j_outer * 1) + j_inner)] = acc[0]
 }
@@ -388,18 +388,18 @@ function fused_dense_bias_relu_packed(A, W, B, Out) {
       }
     }
   }
-  for (let i_outer = 0; i_outer < 1; i_outer++) {
-    for (let j_outer = 0; j_outer < 1; j_outer++) {
-      for (let i_inner = 0; i_inner < 4; i_inner++) {
-        for (let j_inner = 0; j_inner < 64; j_inner++) {
+  for (let i_outer = 0; i_outer < 2; i_outer++) {
+    for (let j_outer = 0; j_outer < 2; j_outer++) {
+      for (let i_inner = 0; i_inner < 2; i_inner++) {
+        for (let j_inner = 0; j_inner < 32; j_inner++) {
           acc = 0;
           for (let k_outer = 0; k_outer < 8; k_outer++) {
             for (let k_inner = 0; k_inner < 4; k_inner++) {
-              acc = (acc + (A[((i_outer * 4) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 64) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 64) + j_inner) % 16)]));
+              acc = (acc + (A[((i_outer * 2) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 32) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 32) + j_inner) % 16)]));
             }
           }
-          acc = (acc + B[0 * 64 + ((j_outer * 64) + j_inner)]);
-          Out[((i_outer * 4) + i_inner) * 64 + ((j_outer * 64) + j_inner)] = Math.max(acc, 0);
+          acc = (acc + B[0 * 64 + ((j_outer * 32) + j_inner)]);
+          Out[((i_outer * 2) + i_inner) * 64 + ((j_outer * 32) + j_inner)] = Math.max(acc, 0);
         }
       }
     }
@@ -420,9 +420,9 @@ function fused_dense_bias(A, W, B, Out) {
       // unrolled loop j_inner (1 iterations)
       { const j_inner = 0;
         acc = 0;
-        for (let k_outer = 0; k_outer < 2; k_outer++) {
-          for (let k_inner = 0; k_inner < 32; k_inner++) {
-            acc = (acc + (A[i * 64 + ((k_outer * 32) + k_inner)] * W[(j_outer + j_inner) * 64 + ((k_outer * 32) + k_inner)]));
+        for (let k_outer = 0; k_outer < 16; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 64 + ((k_outer * 4) + k_inner)] * W[(j_outer + j_inner) * 64 + ((k_outer * 4) + k_inner)]));
           }
         }
         acc = (acc + B[0 + (j_outer + j_inner)]);
@@ -802,12 +802,12 @@ Memory Analysis for fused_dense_bias_relu_packed:
 
   FLOP count: 16,896
   Memory traffic (naive):     82.0 KB (18,688 reads, 2,304 writes)
-  Memory traffic (effective):  82.0 KB  [after tiling(i,4), tiling(j,64), tiling(k,4), scalar_promotion]
+  Memory traffic (effective):  82.0 KB  [after tiling(i,2), tiling(j,32), tiling(k,4), scalar_promotion]
   Arithmetic intensity (naive):     0.20 FLOP/byte
   Arithmetic intensity (effective): 0.20 FLOP/byte  ← cache-aware
   Note: scalar_promotion eliminates Float32Array heap alloc → register variable.
         Reduces per-call overhead; speedup exceeds what FLOP/byte AI predicts.
-  Working set: 9.5 KB
+  Working set: 4.5 KB
   Cache fitness: L1 ✓
   Bottleneck: 🧊 MEMORY-BOUND
 
@@ -820,7 +820,7 @@ Memory Analysis for fused_dense_bias:
 
   FLOP count: 516
   Memory traffic (naive):     2.0 KB (516 reads, 4 writes)
-  Memory traffic (effective):  2.0 KB  [after tiling(k,32), scalar_promotion]
+  Memory traffic (effective):  2.0 KB  [after tiling(k,4), scalar_promotion]
   Arithmetic intensity (naive):     0.25 FLOP/byte
   Arithmetic intensity (effective): 0.25 FLOP/byte  ← cache-aware
   Note: scalar_promotion eliminates Float32Array heap alloc → register variable.
@@ -860,7 +860,7 @@ Memory Analysis for fused_dense_bias:
   ┌──────────────────────────┬──────────┬──────────┬──────────┬─────────────────────────────┐
   │ Kernel                   │ Time(ms) │  GFLOPS  │ AI(F/B)* │ Efficiency                  │
   ├──────────────────────────┼──────────┼──────────┼──────────┼─────────────────────────────┤
-  │ fused_dense_bias_relu_pa │   0.0122 │    1.385 │     0.20 │ [███████░░░░░░░░░░░░░] 34.4% │
+  │ fused_dense_bias_relu_pa │   0.0105 │    1.609 │     0.20 │ [████████░░░░░░░░░░░░] 40.0% │
   │                          │          │          │ eff:0.20 │                             │
   │ fused_dense_bias         │   0.0003 │    1.720 │     0.25 │ [███████░░░░░░░░░░░░░] 34.7% │
   │                          │          │          │ eff:0.25 │                             │
@@ -868,15 +868,15 @@ Memory Analysis for fused_dense_bias:
   * AI(F/B) = intrinsic (naive) arithmetic intensity — algorithm-level, schedule-independent.
 
   🧊 Memory-bound kernels (2): fused_dense_bias_relu_packed, fused_dense_bias
-     fused_dense_bias_relu_packed: applied: [tiling(i,4), tiling(j,64), tiling(k,4), scalar_promotion]  → still consider: cache_read
-     fused_dense_bias: applied: [tiling(k,32), scalar_promotion]  → model too small to reach ridge point (normal for tiny NN inference)
+     fused_dense_bias_relu_packed: applied: [tiling(i,2), tiling(j,32), tiling(k,4), scalar_promotion]  → still consider: cache_read
+     fused_dense_bias: applied: [tiling(k,4), scalar_promotion]  → model too small to reach ridge point (normal for tiny NN inference)
 
 ── D6 Analytical Cost Model ──
   Analytical Cost Model vs Measured — V8/Node.js (estimated)
   ──────────────────────────────────────────────────────────────────────────────────────────
   Kernel                          FLOPs      Bytes   AI(F/B)  Pred.GFLOPS   Meas.ms Bottleneck   Util%
   ──────────────────────────────────────────────────────────────────────────────────────────
-  fused_dense_bias_relu_packed    1.69e+4    2.64e+5     0.064       1.2791 0.0122     memory  12.8% | acc:108%
+  fused_dense_bias_relu_packed    1.69e+4    2.64e+5     0.064       1.2791 0.0105     memory  12.8% | acc:126%
   fused_dense_bias              5.16e+2    4.29e+3     0.120       2.4067 0.0003     memory  24.1% | acc:71%
   ──────────────────────────────────────────────────────────────────────────────────────────
   Note: pred. assumes 100% DRAM traffic — actual AI is higher when data is cached.
@@ -890,9 +890,9 @@ Memory Analysis for fused_dense_bias:
 ════════════════════════════════════════════════════════════
   Weight           Shape        Scale        AbsMax→Range       MaxErr    
   ────────────────────────────────────────────────────────────────────────
-  param_0          [64,32]      3.976e-3     0.505→[-127,127]   ±1.99e-3
+  param_0          [64,32]      3.993e-3     0.507→[-127,127]   ±2.00e-3
   param_1          [1,64]       1.000e-8     0.000→[-127,127]   ±5.00e-9
-  param_2          [1,64]       3.774e-3     0.479→[-127,127]   ±1.89e-3
+  param_2          [1,64]       5.000e-3     0.635→[-127,127]   ±2.50e-3
   param_3          [1,1]        1.000e-8     0.000→[-127,127]   ±5.00e-9
   ────────────────────────────────────────────────────────────────────────
   Total params: 2,177 | float32: 8.5KB → int8: 2.1KB (4× compression)
@@ -901,13 +901,13 @@ Memory Analysis for fused_dense_bias:
     nn.dense + nn.bias_add → fused.dense_bias
 
   Quality metrics (float32 vs int8-dequant):
-    Cosine similarity:  0.999948  ✓ (target ≥ 0.99)
-    Max |Δ|:            1.036e-2
-    Mean |Δ|:           5.592e-3
+    Cosine similarity:  0.999991  ✓ (target ≥ 0.99)
+    Max |Δ|:            3.691e-3
+    Mean |Δ|:           2.908e-3
 
   Throughput (inference):
-    Float32 compiled:   0.0091ms
-    Int8-dequant:       0.0090ms
+    Float32 compiled:   0.0084ms
+    Int8-dequant:       0.0083ms
     Note: True int8 speedup requires native SIMD intrinsics.
           In JavaScript, int8 values are stored as float32 (4× model size preserved).
           Real speedup visible on WebAssembly SIMD / native int8 targets.
@@ -917,51 +917,51 @@ Memory Analysis for fused_dense_bias:
 ════════════════════════════════════════════════════════════
 
 ── Compiled Forward Verification ──
-  NDArray naive result: [-0.35160815715789795, -0.5687673687934875, -0.4592646062374115, -0.6417883038520813...]
+  NDArray naive result: [0.4656684100627899, 0.7198980450630188, 0.4600471556186676, 1.0273866653442383...]
   Compiled naive match: ✓
   Compiled scheduled match: ✓
 
 ── Benchmark ──
-  NDArray naive:       0.0239ms / inference
-  Compiled naive:      0.0079ms / inference
+  NDArray naive:       0.0269ms / inference
+  Compiled naive:      0.0091ms / inference
     Speedup vs NDArray: 3.0x
-  Compiled scheduled:  0.0071ms / inference
-    Speedup vs NDArray: 3.4x
-    Speedup vs compiled naive: 1.13x
+  Compiled scheduled:  0.0068ms / inference
+    Speedup vs NDArray: 4.0x
+    Speedup vs compiled naive: 1.34x
 
 ── Autograd Training Verification ──
   Training binary classifier for 5 steps...
-    Step 0: loss=0.883358 grads=✓
-    Step 1: loss=0.618806 grads=✓
-    Step 2: loss=0.472127 grads=✓
-    Step 3: loss=0.367613 grads=✓
-    Step 4: loss=0.292063 grads=✓
-  Loss changing: ✓ (0.8834 → 0.2921)
+    Step 0: loss=0.423827 grads=✓
+    Step 1: loss=0.314159 grads=✓
+    Step 2: loss=0.241695 grads=✓
+    Step 3: loss=0.191719 grads=✓
+    Step 4: loss=0.156189 grads=✓
+  Loss changing: ✓ (0.4238 → 0.1562)
 
   Adam optimizer (lr=0.01, β₁=0.9, β₂=0.999, ε=1e-8):
-    Step 0: loss=0.467518  effectiveLR=3.162e-3
-    Step 1: loss=0.234405  effectiveLR=2.353e-3
-    Step 2: loss=0.107830  effectiveLR=2.020e-3
-    Step 3: loss=0.048356  effectiveLR=1.838e-3
-    Step 4: loss=0.022383  effectiveLR=1.725e-3
-  Adam convergence: (0.4675 → 0.0224)
+    Step 0: loss=0.519992  effectiveLR=3.162e-3
+    Step 1: loss=0.262837  effectiveLR=2.353e-3
+    Step 2: loss=0.127958  effectiveLR=2.020e-3
+    Step 3: loss=0.059707  effectiveLR=1.838e-3
+    Step 4: loss=0.027666  effectiveLR=1.725e-3
+  Adam convergence: (0.5200 → 0.0277)
   Note: Adam & SGD start from different random inits — absolute loss values differ.
         Both show decreasing loss over 5 steps, demonstrating correct gradient flow.
 
   E7 Batch Normalization (BN) — Linear→BN→ReLU vs Linear→ReLU:
   Step   With BN        Without BN    
   ────────────────────────────────────
-  Step 0 0.363899       0.622846      
-  Step 1 0.183820       0.315504      
-  Step 2 0.126816       0.146109      
-  Step 3 0.088777       0.065165      
-  Step 4 0.062125       0.029980      
+  Step 0 0.654098       0.509724      
+  Step 1 0.389715       0.272944      
+  Step 2 0.259948       0.140145      
+  Step 3 0.187761       0.070345      
+  Step 4 0.138143       0.035507      
   BatchNorm effect: normalizes activations to μ≈0, σ≈1 before each ReLU.
   Note: Both models start from identical Linear weights — only BN layer differs.
         Any loss difference is purely due to BatchNorm normalization, making
         the comparison statistically fair.
-    γ (scale) initial:  1.049, 1.040, 1.038, 0.962...
-    β (shift) initial:  0.049, 0.043, 0.036, -0.037...
+    γ (scale) initial:  1.049, 1.050, 0.989, 1.049...
+    β (shift) initial:  0.049, 0.050, -0.006, 0.049...
 
 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 ▓  MULTICLASS CLASSIFIER — MLC Pipeline
@@ -1141,25 +1141,25 @@ Parameters: 4
 }
 
 ── 5.3 compute_inline — Eliminate Intermediate Buffer ──
-  Producer (bias_add):  4×8 matrix, adds B[0,j] to each row
-    @bias_add(A[4,8], B[1,8], BiasOut[4,8]):
+  Producer (bias_add):  4×64 matrix, adds B[0,j] to each row
+    @bias_add(A[4,64], B[1,64], BiasOut[4,64]):
       for i in range(0, 4):
-        for j in range(0, 8):
+        for j in range(0, 64):
           BiasOut[i,j] = (A[i,j]+B[0,j])
 
   Consumer (relu):      max(BiasOut[i,j], 0)
-    @relu(BiasOut[4,8], Out[4,8]):
+    @relu(BiasOut[4,64], Out[4,64]):
       for i in range(0, 4):
-        for j in range(0, 8):
+        for j in range(0, 64):
           Out[i,j] = max(BiasOut[i,j],0)
 
   After computeInline(bias_add → relu):
     Substituted 1 load site(s)
-    Intermediate buffer 'BiasOut[4,8]' eliminated
+    Intermediate buffer 'BiasOut[4,64]' eliminated
     Merged kernel 'bias_add_inlined_into_relu':
-    @bias_add_inlined_into_relu(Out[4,8], A[4,8], B[1,8]):
+    @bias_add_inlined_into_relu(Out[4,64], A[4,64], B[1,64]):
       for i in range(0, 4):
-        for j in range(0, 8):
+        for j in range(0, 64):
           Out[i,j] = max((A[i,j]+B[0,j]),0)
 
 
@@ -1192,97 +1192,98 @@ Parameters: 4
     Search space: 3×7×6×2(unroll)×2(W_local) = 504 configs
     Strategy: 3 restarts × 50 iterations
     Cooling: T₀=1, rate=0.92
-    Naive baseline: 0.0070ms
-    Restart 1: best=0.0066ms [tile(i=1,j=4,k=4)+unroll]
-    Restart 2: best=0.0064ms [tile(i=2,j=4,k=4)+unroll]
-    Restart 3: best=0.0067ms [tile(i=2,j=64,k=4)+unroll]
+    Naive baseline: 0.0071ms
+    Restart 1: best=0.0069ms [tile(i=4,j=2,k=32)+unroll]
+    Restart 2: best=0.0064ms [tile(i=4,j=2,k=4)+unroll]
+    Restart 3: best=0.0070ms [tile(i=1,j=2,k=32)+unroll]
     ───────────────────────────────
-    Best overall: 0.0064ms [tile(i=2,j=4,k=4)+unroll]
-    Speedup vs naive: 1.09x
+    Best overall: 0.0064ms [tile(i=4,j=2,k=4)+unroll]
+    Speedup vs naive: 1.11x
 Search Progress:
-  [  0] ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0242ms  T=1.000  acc=6/7
-  [  7] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0069ms  T=0.558  acc=2/7
-  [ 14] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0068ms  T=0.311  acc=3/7
-  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0068ms  T=0.174  acc=2/7
-  [ 28] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0068ms  T=0.097  acc=4/7
-  [ 35] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0068ms  T=0.054  acc=1/7
-  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0066ms  T=0.030  acc=3/7
-  [ 49] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0066ms  T=0.017  acc=3/7
-  [ 56] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0066ms  T=0.606  acc=4/7
-  [ 63] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0066ms  T=0.338  acc=2/7
-  [ 70] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0066ms  T=0.189  acc=3/7
-  [ 77] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0064ms  T=0.105  acc=3/7
-  [ 84] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0064ms  T=0.059  acc=2/7
-  [ 91] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0064ms  T=0.033  acc=1/7
-  [ 98] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0064ms  T=0.018  acc=7/7
-  [105] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0064ms  T=0.659  acc=7/7
-  [112] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0064ms  T=0.368  acc=4/7
-  [119] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0064ms  T=0.205  acc=4/7
-  [126] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0064ms  T=0.114  acc=3/7
-  [133] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0064ms  T=0.064  acc=4/7
-  [140] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0064ms  T=0.036  acc=2/7
-  [147] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0064ms  T=0.020  acc=1/3
+  [  0] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0208ms  T=1.000  acc=6/7
+  [  7] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0079ms  T=0.558  acc=3/7
+  [ 14] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0077ms  T=0.311  acc=4/7
+  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0077ms  T=0.174  acc=1/7
+  [ 28] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0077ms  T=0.097  acc=2/7
+  [ 35] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0077ms  T=0.054  acc=1/7
+  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.030  acc=3/7
+  [ 49] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.017  acc=2/7
+  [ 56] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.606  acc=3/7
+  [ 63] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.338  acc=3/7
+  [ 70] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.189  acc=4/7
+  [ 77] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.105  acc=2/7
+  [ 84] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.059  acc=5/7
+  [ 91] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.033  acc=0/7
+  [ 98] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.018  acc=2/7
+  [105] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.659  acc=1/7
+  [112] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.368  acc=3/7
+  [119] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.205  acc=1/7
+  [126] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.114  acc=2/7
+  [133] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.064  acc=0/7
+  [140] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.036  acc=1/7
+  [147] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 0.0069ms  T=0.020  acc=3/3
   Auto-tuning fused_dense_bias (simulated annealing)...
     Search space: 3×4×7×2(unroll)×2(W_local) = 336 configs
     Strategy: 3 restarts × 50 iterations
     Cooling: T₀=1, rate=0.92
     Naive baseline: 0.0032ms
-    Restart 1: best=0.0017ms [tile(i=1,j=4,k=4)+unroll]
-    Restart 2: best=0.0018ms [tile(i=2,j=2,k=64)+unroll]
-    Restart 3: best=0.0018ms [tile(i=2,j=2,k=64)+unroll]
+    Restart 1: best=0.0018ms [tile(i=2,j=1,k=32)+W_local]
+    Restart 2: best=0.0018ms [tile(i=4,j=2,k=64)+unroll]
+    Restart 3: best=0.0028ms [tile(i=2,j=8,k=16)+W_local+unroll]
     ───────────────────────────────
-    Best overall: 0.0017ms [tile(i=1,j=4,k=4)+unroll]
-    Speedup vs naive: 1.88x
+    Best overall: 0.0018ms [tile(i=2,j=1,k=32)+W_local]
+    Speedup vs naive: 1.78x
 Search Progress:
-  [  0] ▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0092ms  T=1.000  acc=5/7
-  [  7] ▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░ 0.0067ms  T=0.558  acc=6/7
-  [ 14] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░ 0.0051ms  T=0.311  acc=7/7
-  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0044ms  T=0.174  acc=6/7
-  [ 28] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.097  acc=1/7
-  [ 35] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.054  acc=0/7
-  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.030  acc=1/7
-  [ 49] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.017  acc=6/7
-  [ 56] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.606  acc=5/7
-  [ 63] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.338  acc=3/7
-  [ 70] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.189  acc=2/7
-  [ 77] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.105  acc=1/7
-  [ 84] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.059  acc=2/7
-  [ 91] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.033  acc=2/7
-  [ 98] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.018  acc=5/7
-  [105] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.659  acc=5/7
-  [112] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.368  acc=7/7
-  [119] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.205  acc=4/7
-  [126] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.114  acc=6/7
-  [133] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.064  acc=3/7
-  [140] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.036  acc=2/7
-  [147] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░ 0.0017ms  T=0.020  acc=1/3
+  [  0] ▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0040ms  T=1.000  acc=5/7
+  [  7] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░ 0.0019ms  T=0.558  acc=1/7
+  [ 14] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░ 0.0019ms  T=0.311  acc=1/7
+  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.174  acc=2/7
+  [ 28] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.097  acc=2/7
+  [ 35] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.054  acc=4/7
+  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.030  acc=6/7
+  [ 49] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.017  acc=7/7
+  [ 56] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.606  acc=7/7
+  [ 63] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.338  acc=5/7
+  [ 70] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.189  acc=6/7
+  [ 77] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.105  acc=4/7
+  [ 84] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.059  acc=2/7
+  [ 91] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.033  acc=2/7
+  [ 98] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.018  acc=6/7
+  [105] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.659  acc=6/7
+  [112] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.368  acc=5/7
+  [119] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.205  acc=2/7
+  [126] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.114  acc=3/7
+  [133] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.064  acc=2/7
+  [140] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.036  acc=2/7
+  [147] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░ 0.0018ms  T=0.020  acc=0/3
 
 ── 7.1 Tuner-selected TIR → feeds Phase 8 & Phase 9 ──
 @fused_dense_bias_relu(A: Buffer[4,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[4,64]) {
   alloc acc: float32[1]  scope=local
-  for i_outer in range(0, 2):
-    for j_outer in range(0, 16):
-      for i_inner in range(0, 2):
-        for j_inner in range(0, 4):  // unroll
+  for i_outer in range(0, 1):
+    for j_outer in range(0, 32):
+      for i_inner in range(0, 4):
+        for j_inner in range(0, 2):  // unroll
           acc[0] = 0
           for k_outer in range(0, 8):  // reduction
             for k_inner in range(0, 4):  // reduction
-              acc[0] = (acc[0] + (A[((i_outer * 2) + i_inner), ((k_outer * 4) + k_inner)] * W[((j_outer * 4) + j_inner), ((k_outer * 4) + k_inner)]))
-          acc[0] = (acc[0] + B[0, ((j_outer * 4) + j_inner)])
-          Out[((i_outer * 2) + i_inner), ((j_outer * 4) + j_inner)] = max(acc[0], 0)
+              acc[0] = (acc[0] + (A[((i_outer * 4) + i_inner), ((k_outer * 4) + k_inner)] * W[((j_outer * 2) + j_inner), ((k_outer * 4) + k_inner)]))
+          acc[0] = (acc[0] + B[0, ((j_outer * 2) + j_inner)])
+          Out[((i_outer * 4) + i_inner), ((j_outer * 2) + j_inner)] = max(acc[0], 0)
 }
 
 @fused_dense_bias(A: Buffer[4,64], W: Buffer[8,64], B: Buffer[1,8], Out: Buffer[4,8]) {
   alloc acc: float32[1]  scope=local
-  for i in range(0, 4):
-    for j_outer in range(0, 2):
-      for j_inner in range(0, 4):  // unroll
-        acc[0] = 0
-        for k_outer in range(0, 16):  // reduction
-          for k_inner in range(0, 4):  // reduction
-            acc[0] = (acc[0] + (A[i, ((k_outer * 4) + k_inner)] * W[((j_outer * 4) + j_inner), ((k_outer * 4) + k_inner)]))
-        acc[0] = (acc[0] + B[0, ((j_outer * 4) + j_inner)])
-        Out[i, ((j_outer * 4) + j_inner)] = acc[0]
+  for i_outer in range(0, 2):
+    for j_outer in range(0, 8):
+      for i_inner in range(0, 2):
+        for j_inner in range(0, 1):
+          acc[0] = 0
+          for k_outer in range(0, 2):  // reduction
+            for k_inner in range(0, 32):  // reduction
+              acc[0] = (acc[0] + (A[((i_outer * 2) + i_inner), ((k_outer * 32) + k_inner)] * W[((j_outer * 1) + j_inner), ((k_outer * 32) + k_inner)]))
+          acc[0] = (acc[0] + B[0, ((j_outer * 1) + j_inner)])
+          Out[((i_outer * 2) + i_inner), ((j_outer * 1) + j_inner)] = acc[0]
 }
 
 
@@ -1352,49 +1353,29 @@ function fused_dense_bias_relu_packed(A, W, B, Out) {
       }
     }
   }
-  for (let i_outer = 0; i_outer < 2; i_outer++) {
-    for (let j_outer = 0; j_outer < 16; j_outer++) {
-      for (let i_inner = 0; i_inner < 2; i_inner++) {
-        // unrolled loop j_inner (4 iterations)
+  for (let i_outer = 0; i_outer < 1; i_outer++) {
+    for (let j_outer = 0; j_outer < 32; j_outer++) {
+      for (let i_inner = 0; i_inner < 4; i_inner++) {
+        // unrolled loop j_inner (2 iterations)
         { const j_inner = 0;
           acc = 0;
           for (let k_outer = 0; k_outer < 8; k_outer++) {
             for (let k_inner = 0; k_inner < 4; k_inner++) {
-              acc = (acc + (A[((i_outer * 2) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 4) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 4) + j_inner) % 16)]));
+              acc = (acc + (A[((i_outer * 4) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 2) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 2) + j_inner) % 16)]));
             }
           }
-          acc = (acc + B[0 * 64 + ((j_outer * 4) + j_inner)]);
-          Out[((i_outer * 2) + i_inner) * 64 + ((j_outer * 4) + j_inner)] = Math.max(acc, 0);
+          acc = (acc + B[0 * 64 + ((j_outer * 2) + j_inner)]);
+          Out[((i_outer * 4) + i_inner) * 64 + ((j_outer * 2) + j_inner)] = Math.max(acc, 0);
         }
         { const j_inner = 1;
           acc = 0;
           for (let k_outer = 0; k_outer < 8; k_outer++) {
             for (let k_inner = 0; k_inner < 4; k_inner++) {
-              acc = (acc + (A[((i_outer * 2) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 4) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 4) + j_inner) % 16)]));
+              acc = (acc + (A[((i_outer * 4) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 2) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 2) + j_inner) % 16)]));
             }
           }
-          acc = (acc + B[0 * 64 + ((j_outer * 4) + j_inner)]);
-          Out[((i_outer * 2) + i_inner) * 64 + ((j_outer * 4) + j_inner)] = Math.max(acc, 0);
-        }
-        { const j_inner = 2;
-          acc = 0;
-          for (let k_outer = 0; k_outer < 8; k_outer++) {
-            for (let k_inner = 0; k_inner < 4; k_inner++) {
-              acc = (acc + (A[((i_outer * 2) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 4) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 4) + j_inner) % 16)]));
-            }
-          }
-          acc = (acc + B[0 * 64 + ((j_outer * 4) + j_inner)]);
-          Out[((i_outer * 2) + i_inner) * 64 + ((j_outer * 4) + j_inner)] = Math.max(acc, 0);
-        }
-        { const j_inner = 3;
-          acc = 0;
-          for (let k_outer = 0; k_outer < 8; k_outer++) {
-            for (let k_inner = 0; k_inner < 4; k_inner++) {
-              acc = (acc + (A[((i_outer * 2) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 4) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 4) + j_inner) % 16)]));
-            }
-          }
-          acc = (acc + B[0 * 64 + ((j_outer * 4) + j_inner)]);
-          Out[((i_outer * 2) + i_inner) * 64 + ((j_outer * 4) + j_inner)] = Math.max(acc, 0);
+          acc = (acc + B[0 * 64 + ((j_outer * 2) + j_inner)]);
+          Out[((i_outer * 4) + i_inner) * 64 + ((j_outer * 2) + j_inner)] = Math.max(acc, 0);
         }
       }
     }
@@ -1410,48 +1391,19 @@ function fused_dense_bias(A, W, B, Out) {
   
   let acc = 0; // scalar (promoted from buffer)
   
-  for (let i = 0; i < 4; i++) {
-    for (let j_outer = 0; j_outer < 2; j_outer++) {
-      // unrolled loop j_inner (4 iterations)
-      { const j_inner = 0;
-        acc = 0;
-        for (let k_outer = 0; k_outer < 16; k_outer++) {
-          for (let k_inner = 0; k_inner < 4; k_inner++) {
-            acc = (acc + (A[i * 64 + ((k_outer * 4) + k_inner)] * W[((j_outer * 4) + j_inner) * 64 + ((k_outer * 4) + k_inner)]));
+  for (let i_outer = 0; i_outer < 2; i_outer++) {
+    for (let j_outer = 0; j_outer < 8; j_outer++) {
+      for (let i_inner = 0; i_inner < 2; i_inner++) {
+        for (let j_inner = 0; j_inner < 1; j_inner++) {
+          acc = 0;
+          for (let k_outer = 0; k_outer < 2; k_outer++) {
+            for (let k_inner = 0; k_inner < 32; k_inner++) {
+              acc = (acc + (A[((i_outer * 2) + i_inner) * 64 + ((k_outer * 32) + k_inner)] * W[(j_outer + j_inner) * 64 + ((k_outer * 32) + k_inner)]));
+            }
           }
+          acc = (acc + B[0 * 8 + (j_outer + j_inner)]);
+          Out[((i_outer * 2) + i_inner) * 8 + (j_outer + j_inner)] = acc;
         }
-        acc = (acc + B[0 * 8 + ((j_outer * 4) + j_inner)]);
-        Out[i * 8 + ((j_outer * 4) + j_inner)] = acc;
-      }
-      { const j_inner = 1;
-        acc = 0;
-        for (let k_outer = 0; k_outer < 16; k_outer++) {
-          for (let k_inner = 0; k_inner < 4; k_inner++) {
-            acc = (acc + (A[i * 64 + ((k_outer * 4) + k_inner)] * W[((j_outer * 4) + j_inner) * 64 + ((k_outer * 4) + k_inner)]));
-          }
-        }
-        acc = (acc + B[0 * 8 + ((j_outer * 4) + j_inner)]);
-        Out[i * 8 + ((j_outer * 4) + j_inner)] = acc;
-      }
-      { const j_inner = 2;
-        acc = 0;
-        for (let k_outer = 0; k_outer < 16; k_outer++) {
-          for (let k_inner = 0; k_inner < 4; k_inner++) {
-            acc = (acc + (A[i * 64 + ((k_outer * 4) + k_inner)] * W[((j_outer * 4) + j_inner) * 64 + ((k_outer * 4) + k_inner)]));
-          }
-        }
-        acc = (acc + B[0 * 8 + ((j_outer * 4) + j_inner)]);
-        Out[i * 8 + ((j_outer * 4) + j_inner)] = acc;
-      }
-      { const j_inner = 3;
-        acc = 0;
-        for (let k_outer = 0; k_outer < 16; k_outer++) {
-          for (let k_inner = 0; k_inner < 4; k_inner++) {
-            acc = (acc + (A[i * 64 + ((k_outer * 4) + k_inner)] * W[((j_outer * 4) + j_inner) * 64 + ((k_outer * 4) + k_inner)]));
-          }
-        }
-        acc = (acc + B[0 * 8 + ((j_outer * 4) + j_inner)]);
-        Out[i * 8 + ((j_outer * 4) + j_inner)] = acc;
       }
     }
   }
@@ -1900,7 +1852,7 @@ Memory Analysis for fused_dense_bias_relu_packed:
 
   FLOP count: 16,896
   Memory traffic (naive):     82.0 KB (18,688 reads, 2,304 writes)
-  Memory traffic (effective):  82.0 KB  [after tiling(i,2), tiling(j,4), tiling(k,4), scalar_promotion]
+  Memory traffic (effective):  82.0 KB  [after tiling(i,4), tiling(j,2), tiling(k,4), scalar_promotion]
   Arithmetic intensity (naive):     0.20 FLOP/byte
   Arithmetic intensity (effective): 0.20 FLOP/byte  ← cache-aware
   Note: scalar_promotion eliminates Float32Array heap alloc → register variable.
@@ -1918,12 +1870,12 @@ Memory Analysis for fused_dense_bias:
 
   FLOP count: 4,128
   Memory traffic (naive):     16.3 KB (4,128 reads, 32 writes)
-  Memory traffic (effective):  10.3 KB  [after tiling(j,4), tiling(k,4), scalar_promotion]
+  Memory traffic (effective):  16.3 KB  [after tiling(i,2), tiling(k,32), scalar_promotion]
   Arithmetic intensity (naive):     0.25 FLOP/byte
-  Arithmetic intensity (effective): 0.39 FLOP/byte  ← cache-aware
+  Arithmetic intensity (effective): 0.25 FLOP/byte  ← cache-aware
   Note: scalar_promotion eliminates Float32Array heap alloc → register variable.
         Reduces per-call overhead; speedup exceeds what FLOP/byte AI predicts.
-  Working set: 1.3 KB
+  Working set: 776 B
   Cache fitness: L1 ✓
   Bottleneck: 🧊 MEMORY-BOUND
 
@@ -1958,24 +1910,24 @@ Memory Analysis for fused_dense_bias:
   ┌──────────────────────────┬──────────┬──────────┬──────────┬─────────────────────────────┐
   │ Kernel                   │ Time(ms) │  GFLOPS  │ AI(F/B)* │ Efficiency                  │
   ├──────────────────────────┼──────────┼──────────┼──────────┼─────────────────────────────┤
-  │ fused_dense_bias_relu_pa │   0.0112 │    1.509 │     0.20 │ [███████░░░░░░░░░░░░░] 37.5% │
+  │ fused_dense_bias_relu_pa │   0.0113 │    1.495 │     0.20 │ [███████░░░░░░░░░░░░░] 37.2% │
   │                          │          │          │ eff:0.20 │                             │
-  │ fused_dense_bias         │   0.0017 │    2.428 │     0.25 │ [██████████░░░░░░░░░░] 48.9% │
+  │ fused_dense_bias         │   0.0020 │    2.064 │     0.25 │ [████████░░░░░░░░░░░░] 41.6% │
   │                          │          │          │ eff:0.25 │                             │
   └──────────────────────────┴──────────┴──────────┴──────────┴─────────────────────────────┘
   * AI(F/B) = intrinsic (naive) arithmetic intensity — algorithm-level, schedule-independent.
 
   🧊 Memory-bound kernels (2): fused_dense_bias_relu_packed, fused_dense_bias
-     fused_dense_bias_relu_packed: applied: [tiling(i,2), tiling(j,4), tiling(k,4), scalar_promotion]  → still consider: cache_read
-     fused_dense_bias: applied: [tiling(j,4), tiling(k,4), scalar_promotion]  → still consider: cache_read
+     fused_dense_bias_relu_packed: applied: [tiling(i,4), tiling(j,2), tiling(k,4), scalar_promotion]  → still consider: cache_read
+     fused_dense_bias: applied: [tiling(i,2), tiling(k,32), scalar_promotion]  → model too small to reach ridge point (normal for tiny NN inference)
 
 ── D6 Analytical Cost Model ──
   Analytical Cost Model vs Measured — V8/Node.js (estimated)
   ──────────────────────────────────────────────────────────────────────────────────────────
   Kernel                          FLOPs      Bytes   AI(F/B)  Pred.GFLOPS   Meas.ms Bottleneck   Util%
   ──────────────────────────────────────────────────────────────────────────────────────────
-  fused_dense_bias_relu_packed    1.69e+4    2.64e+5     0.064       1.2791 0.0112     memory  12.8% | acc:118%
-  fused_dense_bias              4.13e+3    3.43e+4     0.120       2.4067 0.0017     memory  24.1% | acc:101%
+  fused_dense_bias_relu_packed    1.69e+4    2.64e+5     0.064       1.2791 0.0113     memory  12.8% | acc:117%
+  fused_dense_bias              4.13e+3    3.43e+4     0.120       2.4067 0.0020     memory  24.1% | acc:86%
   ──────────────────────────────────────────────────────────────────────────────────────────
   Note: pred. assumes 100% DRAM traffic — actual AI is higher when data is cached.
         acc = measured_GFLOPS / predicted_GFLOPS × 100%.
@@ -1988,9 +1940,9 @@ Memory Analysis for fused_dense_bias:
 ════════════════════════════════════════════════════════════
   Weight           Shape        Scale        AbsMax→Range       MaxErr    
   ────────────────────────────────────────────────────────────────────────
-  param_0          [64,32]      4.085e-3     0.519→[-127,127]   ±2.04e-3
+  param_0          [64,32]      3.847e-3     0.489→[-127,127]   ±1.92e-3
   param_1          [1,64]       1.000e-8     0.000→[-127,127]   ±5.00e-9
-  param_2          [8,64]       3.979e-3     0.505→[-127,127]   ±1.99e-3
+  param_2          [8,64]       4.525e-3     0.575→[-127,127]   ±2.26e-3
   param_3          [1,8]        1.000e-8     0.000→[-127,127]   ±5.00e-9
   ────────────────────────────────────────────────────────────────────────
   Total params: 2,632 | float32: 10.3KB → int8: 2.6KB (4× compression)
@@ -1999,13 +1951,13 @@ Memory Analysis for fused_dense_bias:
     nn.dense + nn.bias_add → fused.dense_bias
 
   Quality metrics (float32 vs int8-dequant):
-    Cosine similarity:  0.999964  ✓ (target ≥ 0.99)
-    Max |Δ|:            6.625e-3
-    Mean |Δ|:           2.605e-3
+    Cosine similarity:  0.999916  ✓ (target ≥ 0.99)
+    Max |Δ|:            1.487e-2
+    Mean |Δ|:           3.842e-3
 
   Throughput (inference):
-    Float32 compiled:   0.0092ms
-    Int8-dequant:       0.0092ms
+    Float32 compiled:   0.0094ms
+    Int8-dequant:       0.0123ms
     Note: True int8 speedup requires native SIMD intrinsics.
           In JavaScript, int8 values are stored as float32 (4× model size preserved).
           Real speedup visible on WebAssembly SIMD / native int8 targets.
@@ -2015,51 +1967,51 @@ Memory Analysis for fused_dense_bias:
 ════════════════════════════════════════════════════════════
 
 ── Compiled Forward Verification ──
-  NDArray naive result: [-0.4384670853614807, -0.20704373717308044, -0.5024315714836121, -0.1291952133178711, -0.6056877970695496...]
+  NDArray naive result: [0.6084608435630798, 0.3924909234046936, 0.47992196679115295, 0.06322714686393738, 0.012235687114298344...]
   Compiled naive match: ✓
   Compiled scheduled match: ✓
 
 ── Benchmark ──
-  NDArray naive:       0.0292ms / inference
-  Compiled naive:      0.0099ms / inference
-    Speedup vs NDArray: 2.9x
-  Compiled scheduled:  0.0066ms / inference
-    Speedup vs NDArray: 4.4x
-    Speedup vs compiled naive: 1.50x
+  NDArray naive:       0.0290ms / inference
+  Compiled naive:      0.0091ms / inference
+    Speedup vs NDArray: 3.2x
+  Compiled scheduled:  0.0062ms / inference
+    Speedup vs NDArray: 4.7x
+    Speedup vs compiled naive: 1.46x
 
 ── Autograd Training Verification ──
   Training multiclass classifier for 5 steps...
-    Step 0: loss=2.504233 grads=✓
-    Step 1: loss=1.773344 grads=✓
-    Step 2: loss=1.340133 grads=✓
-    Step 3: loss=1.040454 grads=✓
-    Step 4: loss=0.846941 grads=✓
-  Loss changing: ✓ (2.5042 → 0.8469)
+    Step 0: loss=2.058892 grads=✓
+    Step 1: loss=1.411284 grads=✓
+    Step 2: loss=0.962677 grads=✓
+    Step 3: loss=0.719110 grads=✓
+    Step 4: loss=0.590440 grads=✓
+  Loss changing: ✓ (2.0589 → 0.5904)
 
   Adam optimizer (lr=0.01, β₁=0.9, β₂=0.999, ε=1e-8):
-    Step 0: loss=2.011368  effectiveLR=3.162e-3
-    Step 1: loss=1.172316  effectiveLR=2.353e-3
-    Step 2: loss=0.671597  effectiveLR=2.020e-3
-    Step 3: loss=0.456633  effectiveLR=1.838e-3
-    Step 4: loss=0.374666  effectiveLR=1.725e-3
-  Adam convergence: (2.0114 → 0.3747)
+    Step 0: loss=2.127144  effectiveLR=3.162e-3
+    Step 1: loss=1.485109  effectiveLR=2.353e-3
+    Step 2: loss=0.998685  effectiveLR=2.020e-3
+    Step 3: loss=0.696068  effectiveLR=1.838e-3
+    Step 4: loss=0.544490  effectiveLR=1.725e-3
+  Adam convergence: (2.1271 → 0.5445)
   Note: Adam & SGD start from different random inits — absolute loss values differ.
         Both show decreasing loss over 5 steps, demonstrating correct gradient flow.
 
   E7 Batch Normalization (BN) — Linear→BN→ReLU vs Linear→ReLU:
   Step   With BN        Without BN    
   ────────────────────────────────────
-  Step 0 2.678716       2.286413      
-  Step 1 1.542358       1.616095      
-  Step 2 0.894002       1.149795      
-  Step 3 0.467078       0.824436      
-  Step 4 0.243585       0.635018      
+  Step 0 2.407528       1.999214      
+  Step 1 1.350273       1.344658      
+  Step 2 0.662108       0.908436      
+  Step 3 0.325881       0.644757      
+  Step 4 0.170937       0.507080      
   BatchNorm effect: normalizes activations to μ≈0, σ≈1 before each ReLU.
   Note: Both models start from identical Linear weights — only BN layer differs.
         Any loss difference is purely due to BatchNorm normalization, making
         the comparison statistically fair.
-    γ (scale) initial:  1.049, 0.976, 1.013, 1.049...
-    β (shift) initial:  0.042, -0.034, 0.049, 0.047...
+    γ (scale) initial:  0.961, 1.049, 1.044, 1.048...
+    β (shift) initial:  -0.038, 0.049, 0.047, 0.048...
 
 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 ▓  MULTILABEL CLASSIFIER — MLC Pipeline
@@ -2239,25 +2191,25 @@ Parameters: 4
 }
 
 ── 5.3 compute_inline — Eliminate Intermediate Buffer ──
-  Producer (bias_add):  4×8 matrix, adds B[0,j] to each row
-    @bias_add(A[4,8], B[1,8], BiasOut[4,8]):
+  Producer (bias_add):  4×64 matrix, adds B[0,j] to each row
+    @bias_add(A[4,64], B[1,64], BiasOut[4,64]):
       for i in range(0, 4):
-        for j in range(0, 8):
+        for j in range(0, 64):
           BiasOut[i,j] = (A[i,j]+B[0,j])
 
   Consumer (relu):      max(BiasOut[i,j], 0)
-    @relu(BiasOut[4,8], Out[4,8]):
+    @relu(BiasOut[4,64], Out[4,64]):
       for i in range(0, 4):
-        for j in range(0, 8):
+        for j in range(0, 64):
           Out[i,j] = max(BiasOut[i,j],0)
 
   After computeInline(bias_add → relu):
     Substituted 1 load site(s)
-    Intermediate buffer 'BiasOut[4,8]' eliminated
+    Intermediate buffer 'BiasOut[4,64]' eliminated
     Merged kernel 'bias_add_inlined_into_relu':
-    @bias_add_inlined_into_relu(Out[4,8], A[4,8], B[1,8]):
+    @bias_add_inlined_into_relu(Out[4,64], A[4,64], B[1,64]):
       for i in range(0, 4):
-        for j in range(0, 8):
+        for j in range(0, 64):
           Out[i,j] = max((A[i,j]+B[0,j]),0)
 
 
@@ -2291,88 +2243,87 @@ Parameters: 4
     Strategy: 3 restarts × 50 iterations
     Cooling: T₀=1, rate=0.92
     Naive baseline: 0.0065ms
-    Restart 1: best=0.0068ms [tile(i=1,j=16,k=4)]
-    Restart 2: best=0.0073ms [tile(i=2,j=64,k=16)+unroll]
-    Restart 3: best=0.0065ms [tile(i=1,j=2,k=4)+unroll]
+    Restart 1: best=0.0070ms [tile(i=1,j=32,k=32)+unroll]
+    Restart 2: best=0.0065ms [tile(i=4,j=8,k=4)+unroll]
+    Restart 3: best=0.0070ms [tile(i=4,j=64,k=32)+unroll]
     ───────────────────────────────
-    Best overall: 0.0065ms [tile(i=1,j=1,k=1)]
+    Best overall: 0.0065ms [tile(i=4,j=8,k=4)+unroll]
     Speedup vs naive: 1.00x
     Note: No schedule improvement found.
           Expected for micro-kernels (batch=4, loops≤64) where JS JIT
           overhead dominates arithmetic — all configs are equivalent.
           Tuning benefit is visible at larger batch sizes (≥64).
 Search Progress:
-  [  0] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0078ms  T=1.000  acc=3/7
-  [  7] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0074ms  T=0.558  acc=4/7
-  [ 14] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0072ms  T=0.311  acc=2/7
-  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0068ms  T=0.174  acc=4/7
-  [ 28] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0068ms  T=0.097  acc=2/7
-  [ 35] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0068ms  T=0.054  acc=2/7
-  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0068ms  T=0.030  acc=3/7
-  [ 49] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0068ms  T=0.017  acc=3/7
-  [ 56] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0068ms  T=0.606  acc=4/7
-  [ 63] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0068ms  T=0.338  acc=3/7
-  [ 70] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0068ms  T=0.189  acc=4/7
-  [ 77] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0068ms  T=0.105  acc=2/7
-  [ 84] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0068ms  T=0.059  acc=2/7
-  [ 91] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0068ms  T=0.033  acc=0/7
-  [ 98] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0068ms  T=0.018  acc=5/7
-  [105] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0068ms  T=0.659  acc=3/7
-  [112] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0068ms  T=0.368  acc=2/7
-  [119] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0065ms  T=0.205  acc=2/7
-  [126] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0065ms  T=0.114  acc=2/7
-  [133] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0065ms  T=0.064  acc=2/7
-  [140] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0065ms  T=0.036  acc=3/7
-  [147] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0065ms  T=0.020  acc=1/3
+  [  0] ▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0070ms  T=1.000  acc=5/7
+  [  7] ▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0070ms  T=0.558  acc=3/7
+  [ 14] ▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0070ms  T=0.311  acc=1/7
+  [ 21] ▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0070ms  T=0.174  acc=5/7
+  [ 28] ▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0070ms  T=0.097  acc=4/7
+  [ 35] ▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0070ms  T=0.054  acc=1/7
+  [ 42] ▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0070ms  T=0.030  acc=1/7
+  [ 49] ▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0069ms  T=0.017  acc=1/7
+  [ 56] ▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0069ms  T=0.606  acc=1/7
+  [ 63] ▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0069ms  T=0.338  acc=2/7
+  [ 70] ▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0069ms  T=0.189  acc=4/7
+  [ 77] ▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0067ms  T=0.105  acc=2/7
+  [ 84] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.059  acc=1/7
+  [ 91] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.033  acc=2/7
+  [ 98] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.018  acc=5/7
+  [105] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.659  acc=1/7
+  [112] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.368  acc=4/7
+  [119] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.205  acc=3/7
+  [126] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.114  acc=2/7
+  [133] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.064  acc=5/7
+  [140] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.036  acc=3/7
+  [147] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.020  acc=1/3
   Auto-tuning fused_dense_bias (simulated annealing)...
     Search space: 3×4×7×2(unroll)×2(W_local) = 336 configs
     Strategy: 3 restarts × 50 iterations
     Cooling: T₀=1, rate=0.92
-    Naive baseline: 0.0016ms
-    Restart 1: best=0.0016ms [tile(i=1,j=8,k=4)+unroll]
-    Restart 2: best=0.0018ms [tile(i=1,j=1,k=16)]
-    Restart 3: best=0.0027ms [tile(i=4,j=4,k=1)+unroll]
+    Naive baseline: 0.0034ms
+    Restart 1: best=0.0015ms [tile(i=1,j=1,k=1)]
+    Restart 2: best=0.0017ms [tile(i=2,j=1,k=16)+unroll]
+    Restart 3: best=0.0019ms [tile(i=4,j=2,k=8)]
     ───────────────────────────────
-    Best overall: 0.0016ms [tile(i=1,j=1,k=1)]
-    Speedup vs naive: 1.00x
-    Note: No schedule improvement found.
-          Expected for micro-kernels (batch=4, loops≤64) where JS JIT
-          overhead dominates arithmetic — all configs are equivalent.
-          Tuning benefit is visible at larger batch sizes (≥64).
+    Best overall: 0.0015ms [tile(i=1,j=1,k=1)]
+    Speedup vs naive: 2.27x
 Search Progress:
-  [  0] ▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░ 0.0049ms  T=1.000  acc=6/7
-  [  7] ▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░ 0.0048ms  T=0.558  acc=5/7
-  [ 14] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.311  acc=2/7
-  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.174  acc=1/7
-  [ 28] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.097  acc=5/7
-  [ 35] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.054  acc=2/7
-  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.030  acc=0/7
-  [ 49] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.017  acc=7/7
-  [ 56] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.606  acc=7/7
-  [ 63] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.338  acc=3/7
-  [ 70] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.189  acc=5/7
-  [ 77] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.105  acc=3/7
-  [ 84] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.059  acc=3/7
-  [ 91] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.033  acc=4/7
-  [ 98] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.018  acc=3/7
-  [105] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.659  acc=1/7
-  [112] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.368  acc=4/7
-  [119] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.205  acc=2/7
-  [126] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.114  acc=4/7
-  [133] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.064  acc=0/7
-  [140] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.036  acc=2/7
-  [147] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.020  acc=0/3
+  [  0] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0016ms  T=1.000  acc=6/7
+  [  7] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0016ms  T=0.558  acc=1/7
+  [ 14] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0016ms  T=0.311  acc=1/7
+  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0016ms  T=0.174  acc=6/7
+  [ 28] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0016ms  T=0.097  acc=1/7
+  [ 35] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.054  acc=1/7
+  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.030  acc=3/7
+  [ 49] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.017  acc=4/7
+  [ 56] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.606  acc=6/7
+  [ 63] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.338  acc=1/7
+  [ 70] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.189  acc=3/7
+  [ 77] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.105  acc=3/7
+  [ 84] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.059  acc=0/7
+  [ 91] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.033  acc=0/7
+  [ 98] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.018  acc=5/7
+  [105] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.659  acc=7/7
+  [112] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.368  acc=5/7
+  [119] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.205  acc=4/7
+  [126] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.114  acc=3/7
+  [133] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.064  acc=2/7
+  [140] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.036  acc=1/7
+  [147] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0015ms  T=0.020  acc=1/3
 
 ── 7.1 Tuner-selected TIR → feeds Phase 8 & Phase 9 ──
 @fused_dense_bias_relu(A: Buffer[4,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[4,64]) {
   alloc acc: float32[1]  scope=local
-  for i in range(0, 4):
-    for j in range(0, 64):
-      acc[0] = 0
-      for k in range(0, 32):  // reduction
-        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
-      acc[0] = (acc[0] + B[0, j])
-      Out[i, j] = max(acc[0], 0)
+  for i_outer in range(0, 1):
+    for j_outer in range(0, 8):
+      for i_inner in range(0, 4):
+        for j_inner in range(0, 8):  // unroll
+          acc[0] = 0
+          for k_outer in range(0, 8):  // reduction
+            for k_inner in range(0, 4):  // reduction
+              acc[0] = (acc[0] + (A[((i_outer * 4) + i_inner), ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner), ((k_outer * 4) + k_inner)]))
+          acc[0] = (acc[0] + B[0, ((j_outer * 8) + j_inner)])
+          Out[((i_outer * 4) + i_inner), ((j_outer * 8) + j_inner)] = max(acc[0], 0)
 }
 
 @fused_dense_bias(A: Buffer[4,64], W: Buffer[8,64], B: Buffer[1,8], Out: Buffer[4,8]) {
@@ -2453,14 +2404,91 @@ function fused_dense_bias_relu_packed(A, W, B, Out) {
       }
     }
   }
-  for (let i = 0; i < 4; i++) {
-    for (let j = 0; j < 64; j++) {
-      acc = 0;
-      for (let k = 0; k < 32; k++) {
-        acc = (acc + (A[i * 32 + k] * W_packed[Math.floor(j / 16) * 512 + k * 16 + (j % 16)]));
+  for (let i_outer = 0; i_outer < 1; i_outer++) {
+    for (let j_outer = 0; j_outer < 8; j_outer++) {
+      for (let i_inner = 0; i_inner < 4; i_inner++) {
+        // unrolled loop j_inner (8 iterations)
+        { const j_inner = 0;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 4) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 8) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 8) + j_inner) % 16)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 4) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+        }
+        { const j_inner = 1;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 4) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 8) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 8) + j_inner) % 16)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 4) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+        }
+        { const j_inner = 2;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 4) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 8) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 8) + j_inner) % 16)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 4) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+        }
+        { const j_inner = 3;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 4) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 8) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 8) + j_inner) % 16)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 4) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+        }
+        { const j_inner = 4;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 4) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 8) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 8) + j_inner) % 16)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 4) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+        }
+        { const j_inner = 5;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 4) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 8) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 8) + j_inner) % 16)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 4) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+        }
+        { const j_inner = 6;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 4) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 8) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 8) + j_inner) % 16)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 4) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+        }
+        { const j_inner = 7;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 4) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W_packed[Math.floor(((j_outer * 8) + j_inner) / 16) * 512 + ((k_outer * 4) + k_inner) * 16 + (((j_outer * 8) + j_inner) % 16)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 4) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+        }
       }
-      acc = (acc + B[0 * 64 + j]);
-      Out[i * 64 + j] = Math.max(acc, 0);
     }
   }
 }
@@ -2929,12 +2957,12 @@ Memory Analysis for fused_dense_bias_relu_packed:
 
   FLOP count: 16,896
   Memory traffic (naive):     82.0 KB (18,688 reads, 2,304 writes)
-  Memory traffic (effective):  82.0 KB  [after scalar_promotion]
+  Memory traffic (effective):  82.0 KB  [after tiling(i,4), tiling(j,8), tiling(k,4), scalar_promotion]
   Arithmetic intensity (naive):     0.20 FLOP/byte
   Arithmetic intensity (effective): 0.20 FLOP/byte  ← cache-aware
   Note: scalar_promotion eliminates Float32Array heap alloc → register variable.
         Reduces per-call overhead; speedup exceeds what FLOP/byte AI predicts.
-  Working set: 3.0 KB
+  Working set: 1.6 KB
   Cache fitness: L1 ✓
   Bottleneck: 🧊 MEMORY-BOUND
 
@@ -2987,15 +3015,15 @@ Memory Analysis for fused_dense_bias:
   ┌──────────────────────────┬──────────┬──────────┬──────────┬─────────────────────────────┐
   │ Kernel                   │ Time(ms) │  GFLOPS  │ AI(F/B)* │ Efficiency                  │
   ├──────────────────────────┼──────────┼──────────┼──────────┼─────────────────────────────┤
-  │ fused_dense_bias_relu_pa │   0.0125 │    1.352 │     0.20 │ [███████░░░░░░░░░░░░░] 33.6% │
+  │ fused_dense_bias_relu_pa │   0.0246 │    0.687 │     0.20 │ [███░░░░░░░░░░░░░░░░░] 17.1% │
   │                          │          │          │ eff:0.20 │                             │
-  │ fused_dense_bias         │   0.0016 │    2.580 │     0.25 │ [██████████░░░░░░░░░░] 52.0% │
+  │ fused_dense_bias         │   0.0017 │    2.428 │     0.25 │ [██████████░░░░░░░░░░] 48.9% │
   │                          │          │          │ eff:0.25 │                             │
   └──────────────────────────┴──────────┴──────────┴──────────┴─────────────────────────────┘
   * AI(F/B) = intrinsic (naive) arithmetic intensity — algorithm-level, schedule-independent.
 
   🧊 Memory-bound kernels (2): fused_dense_bias_relu_packed, fused_dense_bias
-     fused_dense_bias_relu_packed: applied: [scalar_promotion]  → still consider: increase tiling
+     fused_dense_bias_relu_packed: applied: [tiling(i,4), tiling(j,8), tiling(k,4), scalar_promotion]  → still consider: cache_read
      fused_dense_bias: applied: [scalar_promotion]  → still consider: increase tiling
 
 ── D6 Analytical Cost Model ──
@@ -3003,8 +3031,8 @@ Memory Analysis for fused_dense_bias:
   ──────────────────────────────────────────────────────────────────────────────────────────
   Kernel                          FLOPs      Bytes   AI(F/B)  Pred.GFLOPS   Meas.ms Bottleneck   Util%
   ──────────────────────────────────────────────────────────────────────────────────────────
-  fused_dense_bias_relu_packed    1.69e+4    2.64e+5     0.064       1.2791 0.0125     memory  12.8% | acc:106%
-  fused_dense_bias              4.13e+3    3.43e+4     0.120       2.4067 0.0016     memory  24.1% | acc:107%
+  fused_dense_bias_relu_packed    1.69e+4    2.64e+5     0.064       1.2791 0.0246     memory  12.8% | acc:54%
+  fused_dense_bias              4.13e+3    3.43e+4     0.120       2.4067 0.0017     memory  24.1% | acc:101%
   ──────────────────────────────────────────────────────────────────────────────────────────
   Note: pred. assumes 100% DRAM traffic — actual AI is higher when data is cached.
         acc = measured_GFLOPS / predicted_GFLOPS × 100%.
@@ -3017,9 +3045,9 @@ Memory Analysis for fused_dense_bias:
 ════════════════════════════════════════════════════════════
   Weight           Shape        Scale        AbsMax→Range       MaxErr    
   ────────────────────────────────────────────────────────────────────────
-  param_0          [64,32]      4.130e-3     0.525→[-127,127]   ±2.07e-3
+  param_0          [64,32]      4.054e-3     0.515→[-127,127]   ±2.03e-3
   param_1          [1,64]       1.000e-8     0.000→[-127,127]   ±5.00e-9
-  param_2          [8,64]       4.201e-3     0.533→[-127,127]   ±2.10e-3
+  param_2          [8,64]       4.106e-3     0.521→[-127,127]   ±2.05e-3
   param_3          [1,8]        1.000e-8     0.000→[-127,127]   ±5.00e-9
   ────────────────────────────────────────────────────────────────────────
   Total params: 2,632 | float32: 10.3KB → int8: 2.6KB (4× compression)
@@ -3028,13 +3056,13 @@ Memory Analysis for fused_dense_bias:
     nn.dense + nn.bias_add → fused.dense_bias
 
   Quality metrics (float32 vs int8-dequant):
-    Cosine similarity:  0.999874  ✓ (target ≥ 0.99)
-    Max |Δ|:            1.556e-2
-    Mean |Δ|:           4.015e-3
+    Cosine similarity:  0.999894  ✓ (target ≥ 0.99)
+    Max |Δ|:            1.128e-2
+    Mean |Δ|:           3.988e-3
 
   Throughput (inference):
-    Float32 compiled:   0.0093ms
-    Int8-dequant:       0.0094ms
+    Float32 compiled:   0.0104ms
+    Int8-dequant:       0.0104ms
     Note: True int8 speedup requires native SIMD intrinsics.
           In JavaScript, int8 values are stored as float32 (4× model size preserved).
           Real speedup visible on WebAssembly SIMD / native int8 targets.
@@ -3044,51 +3072,51 @@ Memory Analysis for fused_dense_bias:
 ════════════════════════════════════════════════════════════
 
 ── Compiled Forward Verification ──
-  NDArray naive result: [0.35020676255226135, -0.1753145307302475, -0.021407995373010635, -0.19304250180721283, -0.45045921206474304...]
+  NDArray naive result: [-0.10347147285938263, -0.0595332533121109, 0.11737258732318878, 0.023788273334503174, 0.47123467922210693...]
   Compiled naive match: ✓
   Compiled scheduled match: ✓
 
 ── Benchmark ──
-  NDArray naive:       0.0272ms / inference
-  Compiled naive:      0.0094ms / inference
-    Speedup vs NDArray: 2.9x
-  Compiled scheduled:  0.0066ms / inference
-    Speedup vs NDArray: 4.1x
-    Speedup vs compiled naive: 1.43x
+  NDArray naive:       0.0277ms / inference
+  Compiled naive:      0.0093ms / inference
+    Speedup vs NDArray: 3.0x
+  Compiled scheduled:  0.0064ms / inference
+    Speedup vs NDArray: 4.3x
+    Speedup vs compiled naive: 1.44x
 
 ── Autograd Training Verification ──
   Training multilabel classifier for 5 steps...
-    Step 0: loss=0.730887 grads=✓
-    Step 1: loss=0.454792 grads=✓
-    Step 2: loss=0.297138 grads=✓
-    Step 3: loss=0.188349 grads=✓
-    Step 4: loss=0.121863 grads=✓
-  Loss changing: ✓ (0.7309 → 0.1219)
+    Step 0: loss=0.755878 grads=✓
+    Step 1: loss=0.450196 grads=✓
+    Step 2: loss=0.290664 grads=✓
+    Step 3: loss=0.181323 grads=✓
+    Step 4: loss=0.116880 grads=✓
+  Loss changing: ✓ (0.7559 → 0.1169)
 
   Adam optimizer (lr=0.01, β₁=0.9, β₂=0.999, ε=1e-8):
-    Step 0: loss=0.684226  effectiveLR=3.162e-3
-    Step 1: loss=0.530083  effectiveLR=2.353e-3
-    Step 2: loss=0.388877  effectiveLR=2.020e-3
-    Step 3: loss=0.264744  effectiveLR=1.838e-3
-    Step 4: loss=0.166187  effectiveLR=1.725e-3
-  Adam convergence: (0.6842 → 0.1662)
+    Step 0: loss=0.661499  effectiveLR=3.162e-3
+    Step 1: loss=0.506697  effectiveLR=2.353e-3
+    Step 2: loss=0.382218  effectiveLR=2.020e-3
+    Step 3: loss=0.277781  effectiveLR=1.838e-3
+    Step 4: loss=0.190148  effectiveLR=1.725e-3
+  Adam convergence: (0.6615 → 0.1901)
   Note: Adam & SGD start from different random inits — absolute loss values differ.
         Both show decreasing loss over 5 steps, demonstrating correct gradient flow.
 
   E7 Batch Normalization (BN) — Linear→BN→ReLU vs Linear→ReLU:
   Step   With BN        Without BN    
   ────────────────────────────────────
-  Step 0 0.755630       0.677408      
-  Step 1 0.564387       0.498343      
-  Step 2 0.417870       0.355856      
-  Step 3 0.315850       0.244448      
-  Step 4 0.240486       0.160082      
+  Step 0 0.964995       0.822552      
+  Step 1 0.738629       0.607976      
+  Step 2 0.586200       0.451536      
+  Step 3 0.462544       0.330585      
+  Step 4 0.362939       0.239069      
   BatchNorm effect: normalizes activations to μ≈0, σ≈1 before each ReLU.
   Note: Both models start from identical Linear weights — only BN layer differs.
         Any loss difference is purely due to BatchNorm normalization, making
         the comparison statistically fair.
-    γ (scale) initial:  0.958, 0.984, 1.048, 0.958...
-    β (shift) initial:  -0.041, -0.002, 0.050, -0.043...
+    γ (scale) initial:  1.050, 0.958, 0.954, 1.050...
+    β (shift) initial:  0.050, -0.039, -0.046, 0.050...
 
 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 ▓  GRADIENT CHECK (Finite Difference Verification)

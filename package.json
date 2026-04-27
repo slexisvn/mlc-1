@@ -5,10 +5,13 @@
   "type": "module",
   "scripts": {
     "start": "npx tsx src/main.ts",
+    "test:wat": "npx tsx src/test_wat.ts",
+    "test:compile": "npx tsx src/test_decorator_compile.ts",
     "build": "tsc"
   },
   "devDependencies": {
     "typescript": "^5.4.0",
-    "tsx": "^4.7.0"
+    "tsx": "^4.7.0",
+    "wabt": "^1.0.36"
   }
 }

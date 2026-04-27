@@ -274,11 +274,14 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
   // The intermediate buffer and the producer's loop nest vanish.
   // Demo: bias_add inlined into relu → single merged loop.
   {
-    // Use the actual classifier output size so the demo matches this classifier's
-    // layer shapes.  Binary: out=1, Multiclass/Multilabel: out=8.
-    const demoOutSize = targetShape[targetShape.length - 1];
+    // The inline demo illustrates bias_add → relu at the HIDDEN layer (first Linear's
+    // output, size=64), NOT the output layer. The output layer emits raw logits — it
+    // has no ReLU. Applying relu there would clip negative logits to 0, breaking
+    // BCEWithLogits / CrossEntropy gradients entirely.
+    const hiddenLayer = (model as Sequential).layers.find(l => l instanceof Linear) as Linear | undefined;
+    const demoHiddenSize = hiddenLayer?.outFeatures ?? 64;
     console.log(`── 5.3 compute_inline — Eliminate Intermediate Buffer ──`);
-    console.log(demoComputeInline(inputShape[0], demoOutSize));
+    console.log(demoComputeInline(inputShape[0], demoHiddenSize));
     console.log('');
   }
 
@@ -392,7 +395,11 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
   for (const pf of primFuncs) {
     const loops = pf.getLoops();
     const jLoop = loops.find(l => l.loopVar.name === 'j');
-    if (jLoop && jLoop.forNode.extent >= 4) {
+    // Guard: j must be >= tileSize AND divisible by tileSize.
+    // Without the % check, registerTileJS would be called for e.g. N=5 or N=6
+    // and silently fall back to codegenJS (inner guard: N % tileSize !== 0).
+    // For N=1 (binary fused_dense_bias): j < tileSize → correctly skipped.
+    if (jLoop && jLoop.forNode.extent >= 4 && jLoop.forNode.extent % 4 === 0) {
       console.log(registerTileJS(pf, 4));
       console.log('');
     }
