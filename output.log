@@ -7,19 +7,19 @@
   Phase 1: Model Tracing (Capture Computation Graph)
 ════════════════════════════════════════════════════════════
 ═══ Traced Computation Graph ═══
-Input: id=4 shape=[1,32]
+Input: id=4 shape=[4,32]
 Target: id=5
 
 ── Forward ──
-  %6 = nn.dense(%4, %0) → [1,64]
-  %7 = bias_add(%6, %1) → [1,64]
-  %8 = relu(%7) → [1,64]
-  %9 = nn.dense(%8, %2) → [1,1]
-  %10 = bias_add(%9, %3) → [1,1]
+  %6 = nn.dense(%4, %0) → [4,64]
+  %7 = bias_add(%6, %1) → [4,64]
+  %8 = relu(%7) → [4,64]
+  %9 = nn.dense(%8, %2) → [4,1]
+  %10 = bias_add(%9, %3) → [4,1]
 ── Loss ──
   %11 = bce_with_logits(%10, %5) → [1]
 
-Output: id=10 shape=[1,1]
+Output: id=10 shape=[4,1]
 Loss: id=11
 Parameters: 4
   param_0: [64,32]
@@ -30,12 +30,12 @@ Parameters: 4
 ════════════════════════════════════════════════════════════
   Phase 2: High-Level IR Construction
 ════════════════════════════════════════════════════════════
-@main(%x: Tensor[(1, 32), float32], %target: Tensor[(1), float32]) → Tensor[(1, 1), float32] {
-  %0 = nn.dense(%x, meta[param_0])  // [1,64]
-  %1 = nn.bias_add(%0, meta[param_1])  // [1,64]
-  %2 = nn.relu(%1)  // [1,64]
-  %3 = nn.dense(%2, meta[param_2])  // [1,1]
-  %4 = nn.bias_add(%3, meta[param_3])  // [1,1]
+@main(%x: Tensor[(4, 32), float32], %target: Tensor[(1), float32]) → Tensor[(4, 1), float32] {
+  %0 = nn.dense(%x, meta[param_0])  // [4,64]
+  %1 = nn.bias_add(%0, meta[param_1])  // [4,64]
+  %2 = nn.relu(%1)  // [4,64]
+  %3 = nn.dense(%2, meta[param_2])  // [4,1]
+  %4 = nn.bias_add(%3, meta[param_3])  // [4,1]
 }
 
 
@@ -52,9 +52,9 @@ Parameters: 4
     nn.dense + nn.bias_add → fused.dense_bias
 
   After fusion:
-@main(%x: Tensor[(1, 32), float32], %target: Tensor[(1), float32]) → Tensor[(1, 1), float32] {
-  %0 = fused.dense_bias_relu(%x, meta[param_0], meta[param_1])  // [1,64]  /* fused: nn.dense → nn.bias_add → nn.relu */
-  %1 = fused.dense_bias(%0, meta[param_2], meta[param_3])  // [1,1]  /* fused: nn.dense → nn.bias_add */
+@main(%x: Tensor[(4, 32), float32], %target: Tensor[(1), float32]) → Tensor[(4, 1), float32] {
+  %0 = fused.dense_bias_relu(%x, meta[param_0], meta[param_1])  // [4,64]  /* fused: nn.dense → nn.bias_add → nn.relu */
+  %1 = fused.dense_bias(%0, meta[param_2], meta[param_3])  // [4,1]  /* fused: nn.dense → nn.bias_add */
 }
 
   Summary: 2 total ops, 2 fused
@@ -76,9 +76,9 @@ Parameters: 4
 ════════════════════════════════════════════════════════════
   Lowered 2 PrimFunc(s):
 
-@fused_dense_bias_relu(A: Buffer[1,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[1,64]) {
+@fused_dense_bias_relu(A: Buffer[4,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[4,64]) {
   alloc acc: float32[1]  scope=local
-  for i in range(0, 1):
+  for i in range(0, 4):
     for j in range(0, 64):
       acc[0] = 0
       for k in range(0, 32):  // reduction
@@ -87,9 +87,9 @@ Parameters: 4
       Out[i, j] = max(acc[0], 0)
 }
 
-@fused_dense_bias(A: Buffer[1,64], W: Buffer[1,64], B: Buffer[1,1], Out: Buffer[1,1]) {
+@fused_dense_bias(A: Buffer[4,64], W: Buffer[1,64], B: Buffer[1,1], Out: Buffer[4,1]) {
   alloc acc: float32[1]  scope=local
-  for i in range(0, 1):
+  for i in range(0, 4):
     for j in range(0, 1):
       acc[0] = 0
       for k in range(0, 64):  // reduction
@@ -118,10 +118,10 @@ Parameters: 4
     (partial sums merged after parallel reduction)
 
   Scheduled TIR:
-@fused_dense_bias_relu(A: Buffer[1,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[1,64]) {
+@fused_dense_bias_relu(A: Buffer[4,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[4,64]) {
   alloc acc: float32[1]  scope=local
   alloc W_local: float32[32,32]  scope=local
-  for i in range(0, 1):
+  for i in range(0, 4):
     for j_outer in range(0, 2):  // parallel
       for _jl_cr in range(0, 32):
         for _kl_cr in range(0, 32):
@@ -129,14 +129,14 @@ Parameters: 4
       for j_inner in range(0, 32):
         acc[0] = 0
         for k in range(0, 32):  // reduction
-          acc[0] = (acc[0] + (A[i, k] * W[((j_outer * 32) + j_inner), k]))
+          acc[0] = (acc[0] + (A[i, k] * W_local[j_inner, k]))
         acc[0] = (acc[0] + B[0, ((j_outer * 32) + j_inner)])
         Out[i, ((j_outer * 32) + j_inner)] = max(acc[0], 0)
 }
 
-@fused_dense_bias(A: Buffer[1,64], W: Buffer[1,64], B: Buffer[1,1], Out: Buffer[1,1]) {
+@fused_dense_bias(A: Buffer[4,64], W: Buffer[1,64], B: Buffer[1,1], Out: Buffer[4,1]) {
   alloc acc: float32[1]  scope=local
-  for i in range(0, 1):
+  for i in range(0, 4):
     for j in range(0, 1):
       acc[0] = 0
       for k in range(0, 64):  // reduction
@@ -170,9 +170,103 @@ Parameters: 4
 ════════════════════════════════════════════════════════════
   Phase 7: Auto-Tuning (Simulated Annealing)
 ════════════════════════════════════════════════════════════
-  [Skipped — pass runAutoTune=true to enable]
-  Now uses simulated annealing with multi-start restarts.
-  Run with runAutoTune=true to see convergence curves.
+  Auto-tuning fused_dense_bias_relu (simulated annealing)...
+    Search space: 3×7×6×2(unroll)×2(W_local) = 504 configs
+    Strategy: 3 restarts × 50 iterations
+    Cooling: T₀=1, rate=0.92
+    Naive baseline: 0.0111ms
+    Restart 1: best=0.0069ms [tile(i=1,j=32,k=4)]
+    Restart 2: best=0.0067ms [tile(i=2,j=8,k=4)]
+    Restart 3: best=0.0064ms [tile(i=1,j=8,k=4)+unroll]
+    ───────────────────────────────
+    Best overall: 0.0064ms [tile(i=1,j=8,k=4)+unroll]
+    Speedup vs naive: 1.73x
+Search Progress:
+  [  0] ▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0097ms  T=1.000  acc=4/7
+  [  7] ▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░ 0.0087ms  T=0.558  acc=4/7
+  [ 14] ▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░ 0.0070ms  T=0.311  acc=1/7
+  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░ 0.0069ms  T=0.174  acc=3/7
+  [ 28] ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░ 0.0069ms  T=0.097  acc=2/7
+  [ 35] ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░ 0.0069ms  T=0.054  acc=2/7
+  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░ 0.0069ms  T=0.030  acc=3/7
+  [ 49] ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░ 0.0069ms  T=0.017  acc=1/7
+  [ 56] ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░ 0.0069ms  T=0.606  acc=2/7
+  [ 63] ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░ 0.0069ms  T=0.338  acc=2/7
+  [ 70] ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░ 0.0067ms  T=0.189  acc=2/7
+  [ 77] ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░ 0.0067ms  T=0.105  acc=3/7
+  [ 84] ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░ 0.0067ms  T=0.059  acc=1/7
+  [ 91] ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░ 0.0067ms  T=0.033  acc=3/7
+  [ 98] ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░ 0.0067ms  T=0.018  acc=4/7
+  [105] ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░ 0.0067ms  T=0.659  acc=2/7
+  [112] ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░ 0.0067ms  T=0.368  acc=3/7
+  [119] ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░ 0.0066ms  T=0.205  acc=2/7
+  [126] ▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░ 0.0064ms  T=0.114  acc=5/7
+  [133] ▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░ 0.0064ms  T=0.064  acc=2/7
+  [140] ▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░ 0.0064ms  T=0.036  acc=0/7
+  [147] ▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░ 0.0064ms  T=0.020  acc=0/3
+  Auto-tuning fused_dense_bias (simulated annealing)...
+    Search space: 3×1×7×2(unroll)×2(W_local) = 84 configs
+    Strategy: 3 restarts × 50 iterations
+    Cooling: T₀=1, rate=0.92
+    Naive baseline: 0.0072ms
+    Restart 1: best=0.0004ms [tile(i=4,j=1,k=1)+W_local+unroll]
+    Restart 2: best=0.0003ms [tile(i=4,j=1,k=32)]
+    Restart 3: best=0.0003ms [tile(i=2,j=1,k=2)+W_local+unroll]
+    ───────────────────────────────
+    Best overall: 0.0003ms [tile(i=4,j=1,k=32)]
+    Speedup vs naive: 24.00x
+Search Progress:
+  [  0] ▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0012ms  T=1.000  acc=7/7
+  [  7] ▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0012ms  T=0.558  acc=7/7
+  [ 14] ▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░ 0.0009ms  T=0.311  acc=6/7
+  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░ 0.0005ms  T=0.174  acc=6/7
+  [ 28] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░ 0.0004ms  T=0.097  acc=6/7
+  [ 35] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░ 0.0004ms  T=0.054  acc=5/7
+  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░ 0.0004ms  T=0.030  acc=5/7
+  [ 49] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░ 0.0004ms  T=0.017  acc=5/7
+  [ 56] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░ 0.0004ms  T=0.606  acc=5/7
+  [ 63] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░ 0.0004ms  T=0.338  acc=6/7
+  [ 70] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░ 0.0004ms  T=0.189  acc=2/7
+  [ 77] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0003ms  T=0.105  acc=4/7
+  [ 84] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0003ms  T=0.059  acc=1/7
+  [ 91] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0003ms  T=0.033  acc=3/7
+  [ 98] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0003ms  T=0.018  acc=5/7
+  [105] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0003ms  T=0.659  acc=5/7
+  [112] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0003ms  T=0.368  acc=4/7
+  [119] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0003ms  T=0.205  acc=2/7
+  [126] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0003ms  T=0.114  acc=2/7
+  [133] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0003ms  T=0.064  acc=0/7
+  [140] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0003ms  T=0.036  acc=0/7
+  [147] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0003ms  T=0.020  acc=2/3
+
+── 7.1 Tuner-selected TIR → feeds Phase 8 & Phase 9 ──
+@fused_dense_bias_relu(A: Buffer[4,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[4,64]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 4):
+    for j_outer in range(0, 8):
+      for j_inner in range(0, 8):  // unroll
+        acc[0] = 0
+        for k_outer in range(0, 8):  // reduction
+          for k_inner in range(0, 4):  // reduction
+            acc[0] = (acc[0] + (A[i, ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner), ((k_outer * 4) + k_inner)]))
+        acc[0] = (acc[0] + B[0, ((j_outer * 8) + j_inner)])
+        Out[i, ((j_outer * 8) + j_inner)] = max(acc[0], 0)
+}
+
+@fused_dense_bias(A: Buffer[4,64], W: Buffer[1,64], B: Buffer[1,1], Out: Buffer[4,1]) {
+  alloc acc: float32[1]  scope=local
+  for i_outer in range(0, 1):
+    for j_outer in range(0, 1):
+      for i_inner in range(0, 4):
+        for j_inner in range(0, 1):
+          acc[0] = 0
+          for k_outer in range(0, 2):  // reduction
+            for k_inner in range(0, 32):  // reduction
+              acc[0] = (acc[0] + (A[((i_outer * 4) + i_inner), ((k_outer * 32) + k_inner)] * W[((j_outer * 1) + j_inner), ((k_outer * 32) + k_inner)]))
+          acc[0] = (acc[0] + B[0, ((j_outer * 1) + j_inner)])
+          Out[((i_outer * 4) + i_inner), ((j_outer * 1) + j_inner)] = acc[0]
+}
+
 
 ════════════════════════════════════════════════════════════
   Phase 8: Code Generation (→ JavaScript)
@@ -181,14 +275,14 @@ Parameters: 4
 ── Naive (unoptimized) code ──
 function fused_dense_bias_relu(A, W, B, Out) {
   // Buffer shapes:
-  // A: [1, 32] (global)
+  // A: [4, 32] (global)
   // W: [64, 32] (global)
   // B: [1, 64] (global)
-  // Out: [1, 64] (global)
+  // Out: [4, 64] (global)
   
   const acc = new Float32Array(1); // local
   
-  for (let i = 0; i < 1; i++) {
+  for (let i = 0; i < 4; i++) {
     for (let j = 0; j < 64; j++) {
       acc[0] = 0;
       for (let k = 0; k < 32; k++) {
@@ -202,14 +296,14 @@ function fused_dense_bias_relu(A, W, B, Out) {
 
 function fused_dense_bias(A, W, B, Out) {
   // Buffer shapes:
-  // A: [1, 64] (global)
+  // A: [4, 64] (global)
   // W: [1, 64] (global)
   // B: [1, 1] (global)
-  // Out: [1, 1] (global)
+  // Out: [4, 1] (global)
   
   const acc = new Float32Array(1); // local
   
-  for (let i = 0; i < 1; i++) {
+  for (let i = 0; i < 4; i++) {
     for (let j = 0; j < 1; j++) {
       acc[0] = 0;
       for (let k = 0; k < 64; k++) {
@@ -222,31 +316,98 @@ function fused_dense_bias(A, W, B, Out) {
 }
 
 
-── Scheduled + Optimized code ──
+── Scheduled + Optimized code (tuner-selected schedule) ──
 function fused_dense_bias_relu(A, W, B, Out) {
   // Buffer shapes:
-  // A: [1, 32] (global)
+  // A: [4, 32] (global)
   // W: [64, 32] (global)
   // B: [1, 64] (global)
-  // Out: [1, 64] (global)
+  // Out: [4, 64] (global)
   
-  const W_local = new Float32Array(1024); // local
   let acc = 0; // scalar (promoted from buffer)
   
-  for (let i = 0; i < 1; i++) {
-    for (let j_outer = 0; j_outer < 2; j_outer++) { /* parallel */
-      for (let _jl_cr = 0; _jl_cr < 32; _jl_cr++) {
-        for (let _kl_cr = 0; _kl_cr < 32; _kl_cr++) {
-          W_local[_jl_cr * 32 + _kl_cr] = W[((j_outer * 32) + _jl_cr) * 32 + _kl_cr];
-        }
-      }
-      for (let j_inner = 0; j_inner < 32; j_inner++) {
+  for (let i = 0; i < 4; i++) {
+    for (let j_outer = 0; j_outer < 8; j_outer++) {
+      // unrolled loop j_inner (8 iterations)
+      { const j_inner = 0;
         acc = 0;
-        for (let k = 0; k < 32; k++) {
-          acc = (acc + (A[i * 32 + k] * W[((j_outer * 32) + j_inner) * 32 + k]));
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
         }
-        acc = (acc + B[0 * 64 + ((j_outer * 32) + j_inner)]);
-        Out[i * 64 + ((j_outer * 32) + j_inner)] = Math.max(acc, 0);
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+      }
+      { const j_inner = 1;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+      }
+      { const j_inner = 2;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+      }
+      { const j_inner = 3;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+      }
+      { const j_inner = 4;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+      }
+      { const j_inner = 5;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+      }
+      { const j_inner = 6;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+      }
+      { const j_inner = 7;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
       }
     }
   }
@@ -254,21 +415,27 @@ function fused_dense_bias_relu(A, W, B, Out) {
 
 function fused_dense_bias(A, W, B, Out) {
   // Buffer shapes:
-  // A: [1, 64] (global)
+  // A: [4, 64] (global)
   // W: [1, 64] (global)
   // B: [1, 1] (global)
-  // Out: [1, 1] (global)
+  // Out: [4, 1] (global)
   
   let acc = 0; // scalar (promoted from buffer)
   
-  for (let i = 0; i < 1; i++) {
-    for (let j = 0; j < 1; j++) {
-      acc = 0;
-      for (let k = 0; k < 64; k++) {
-        acc = (acc + (A[i * 64 + k] * W[j * 64 + k]));
+  for (let i_outer = 0; i_outer < 1; i_outer++) {
+    for (let j_outer = 0; j_outer < 1; j_outer++) {
+      for (let i_inner = 0; i_inner < 4; i_inner++) {
+        for (let j_inner = 0; j_inner < 1; j_inner++) {
+          acc = 0;
+          for (let k_outer = 0; k_outer < 2; k_outer++) {
+            for (let k_inner = 0; k_inner < 32; k_inner++) {
+              acc = (acc + (A[((i_outer * 4) + i_inner) * 64 + ((k_outer * 32) + k_inner)] * W[(j_outer + j_inner) * 64 + ((k_outer * 32) + k_inner)]));
+            }
+          }
+          acc = (acc + B[0 + (j_outer + j_inner)]);
+          Out[((i_outer * 4) + i_inner) + (j_outer + j_inner)] = acc;
+        }
       }
-      acc = (acc + B[0 + j]);
-      Out[i + j] = acc;
     }
   }
 }
@@ -278,9 +445,9 @@ function fused_dense_bias(A, W, B, Out) {
 function fused_dense_bias_relu_reg4(A, W, B, Out) {
   // Register-tiled: 4-way accumulator unrolling
   // Loads A[k] once, reuses for 4 output elements → 4× fewer A reads
-  for (let i = 0; i < 1; i++) {
+  for (let i = 0; i < 4; i++) {
     for (let j = 0; j < 64; j += 4) {
-      let acc0 = acc1 = acc2 = acc3 = 0;
+      let acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
       for (let k = 0; k < 32; k++) {
         const a = A[i * 32 + k]; // load once, reuse 4x
         acc0 += a * W[(j + 0) * 32 + k];
@@ -307,32 +474,38 @@ function fused_dense_bias_relu_reg4(A, W, B, Out) {
 
 ── Per-Kernel Memory Analysis ──
 Memory Analysis for fused_dense_bias_relu:
-  Total buffer size: 8.6 KB
-    A[1,32]: 128 B (input)
+  Total buffer size: 9.8 KB
+    A[4,32]: 512 B (input)
     W[64,32]: 8.0 KB (input)
     B[1,64]: 256 B (input)
-    Out[1,64]: 256 B (output)
-    acc[1]: 4 B (local)
+    Out[4,64]: 1.0 KB (output)
 
-  FLOP count: 4,224
-  Memory traffic: 33.5 KB (6,336 reads, 2,240 writes)
-  Arithmetic intensity: 0.12 FLOP/byte
-  Working set: 1.0 KB
+  FLOP count: 16,896
+  Memory traffic (naive):     66.0 KB (16,640 reads, 256 writes)
+  Memory traffic (effective):  42.0 KB  [after tiling(j,8), scalar_promotion]
+  Arithmetic intensity (naive):     0.25 FLOP/byte
+  Arithmetic intensity (effective): 0.39 FLOP/byte  ← cache-aware
+  Note: scalar_promotion eliminates Float32Array heap alloc → register variable.
+        Reduces per-call overhead; speedup exceeds what FLOP/byte AI predicts.
+  Working set: 1.2 KB
   Cache fitness: L1 ✓
   Bottleneck: 🧊 MEMORY-BOUND
 
 Memory Analysis for fused_dense_bias:
-  Total buffer size: 524 B
-    A[1,64]: 256 B (input)
+  Total buffer size: 1.3 KB
+    A[4,64]: 1.0 KB (input)
     W[1,64]: 256 B (input)
     B[1,1]: 4 B (input)
-    Out[1,1]: 4 B (output)
-    acc[1]: 4 B (local)
+    Out[4,1]: 16 B (output)
 
-  FLOP count: 129
-  Memory traffic: 1.0 KB (195 reads, 67 writes)
-  Arithmetic intensity: 0.12 FLOP/byte
-  Working set: 16 B
+  FLOP count: 516
+  Memory traffic (naive):     2.0 KB (516 reads, 4 writes)
+  Memory traffic (effective):  2.0 KB  [after tiling(j,1), scalar_promotion]
+  Arithmetic intensity (naive):     0.25 FLOP/byte
+  Arithmetic intensity (effective): 0.25 FLOP/byte  ← cache-aware
+  Note: scalar_promotion eliminates Float32Array heap alloc → register variable.
+        Reduces per-call overhead; speedup exceeds what FLOP/byte AI predicts.
+  Working set: 516 B
   Cache fitness: L1 ✓
   Bottleneck: 🧊 MEMORY-BOUND
 
@@ -347,6 +520,9 @@ Memory Analysis for fused_dense_bias:
   Peak bandwidth:  20 GB/s
   Ridge point:     0.50 FLOP/byte
 
+  ⚠  Timing: tuner-selected scheduled TIR (via compile()).
+     Main benchmark uses register-tiled path (compileRegTile) — see VERIFICATION.
+
   GFLOPS
   10.0 ┤─────────────── compute roof ─────────────────
     8.8 ┤ 
@@ -354,47 +530,52 @@ Memory Analysis for fused_dense_bias:
     6.3 ┤ 
     5.0 ┤    / (AI=0.25)
     3.8 ┤    / (AI=0.19)
-    2.5 ┤    / (AI=0.13)
-    1.3 ┤    / (AI=0.06)
-    0.0 ┤  ★ fused_dense_bias_relu  ★ fused_dense_bias    / (AI=0.00)
+    2.5 ┤  ★ fused_dense_bias_relu    / (AI=0.13)
+    1.3 ┤  ★ fused_dense_bias    / (AI=0.06)
+    0.0 ┤    / (AI=0.00)
         └────────────────────────────────────────────
          0.01  0.1   0.5   1.0   5.0   10.0
                  Arithmetic Intensity (FLOP/byte)
 
   ┌──────────────────────────┬──────────┬──────────┬──────────┬─────────────────────────────┐
-  │ Kernel                   │ Time(ms) │  GFLOPS  │ AI(F/B)  │ Efficiency                  │
+  │ Kernel                   │ Time(ms) │  GFLOPS  │ AI(F/B)* │ Efficiency                  │
   ├──────────────────────────┼──────────┼──────────┼──────────┼─────────────────────────────┤
-  │ fused_dense_bias_relu    │   0.0142 │    0.297 │     0.12 │ [██░░░░░░░░░░░░░░░░░░] 12.1% │
-  │ fused_dense_bias         │   0.0030 │    0.043 │     0.12 │ [░░░░░░░░░░░░░░░░░░░░] 1.7% │
+  │ fused_dense_bias_relu    │   0.0066 │    2.560 │     0.25 │ [███████░░░░░░░░░░░░░] 32.6% │
+  │                          │          │          │ eff:0.39 │                             │
+  │ fused_dense_bias         │   0.0003 │    1.720 │     0.25 │ [███████░░░░░░░░░░░░░] 34.7% │
+  │                          │          │          │ eff:0.25 │                             │
   └──────────────────────────┴──────────┴──────────┴──────────┴─────────────────────────────┘
+  * AI(F/B) = intrinsic (naive) arithmetic intensity — algorithm-level, schedule-independent.
 
   🧊 Memory-bound kernels (2): fused_dense_bias_relu, fused_dense_bias
-     → Recommendation: increase tiling, add cache_read, layout transform
+     fused_dense_bias_relu: applied: [tiling(j,8), scalar_promotion]  → still consider: cache_read
+     fused_dense_bias: applied: [tiling(j,1), scalar_promotion]  → model too small to reach ridge point (normal for tiny NN inference)
 
 ════════════════════════════════════════════════════════════
   VERIFICATION
 ════════════════════════════════════════════════════════════
 
 ── Compiled Forward Verification ──
-  NDArray naive result: [-0.19899292290210724...]
+  NDArray naive result: [0.7140328288078308, 0.4520646631717682, 0.7977860569953918, 1.0160517692565918...]
   Compiled naive match: ✓
   Compiled scheduled match: ✓
 
 ── Benchmark ──
-  NDArray naive:       0.0426ms / inference
-  Compiled naive:      0.0217ms / inference
-    Speedup vs NDArray: 2.0x
-  Compiled scheduled:  0.0254ms / inference
-    Speedup vs NDArray: 1.7x
+  NDArray naive:       0.0266ms / inference
+  Compiled naive:      0.0080ms / inference
+    Speedup vs NDArray: 3.3x
+  Compiled scheduled:  0.0061ms / inference
+    Speedup vs NDArray: 4.4x
+    Speedup vs compiled naive: 1.32x
 
 ── Autograd Training Verification ──
   Training binary classifier for 5 steps...
-    Step 0: loss=0.587723 grads=✓
-    Step 1: loss=0.452013 grads=✓
-    Step 2: loss=0.402690 grads=✓
-    Step 3: loss=0.378890 grads=✓
-    Step 4: loss=0.365410 grads=✓
-  Loss changing: ✓ (0.5877 → 0.3654)
+    Step 0: loss=0.401230 grads=✓
+    Step 1: loss=0.285255 grads=✓
+    Step 2: loss=0.215815 grads=✓
+    Step 3: loss=0.170216 grads=✓
+    Step 4: loss=0.138478 grads=✓
+  Loss changing: ✓ (0.4012 → 0.1385)
 
 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 ▓  MULTICLASS CLASSIFIER — MLC Pipeline
@@ -404,20 +585,20 @@ Memory Analysis for fused_dense_bias:
   Phase 1: Model Tracing (Capture Computation Graph)
 ════════════════════════════════════════════════════════════
 ═══ Traced Computation Graph ═══
-Input: id=312 shape=[1,32]
-Target: id=313
+Input: id=2062 shape=[4,32]
+Target: id=2063
 
 ── Forward ──
-  %314 = nn.dense(%312, %308) → [1,64]
-  %315 = bias_add(%314, %309) → [1,64]
-  %316 = relu(%315) → [1,64]
-  %317 = nn.dense(%316, %310) → [1,8]
-  %318 = bias_add(%317, %311) → [1,8]
+  %2064 = nn.dense(%2062, %2058) → [4,64]
+  %2065 = bias_add(%2064, %2059) → [4,64]
+  %2066 = relu(%2065) → [4,64]
+  %2067 = nn.dense(%2066, %2060) → [4,8]
+  %2068 = bias_add(%2067, %2061) → [4,8]
 ── Loss ──
-  %319 = cross_entropy(%318, %313) → [1]
+  %2069 = cross_entropy(%2068, %2063) → [1]
 
-Output: id=318 shape=[1,8]
-Loss: id=319
+Output: id=2068 shape=[4,8]
+Loss: id=2069
 Parameters: 4
   param_0: [64,32]
   param_1: [1,64]
@@ -427,12 +608,12 @@ Parameters: 4
 ════════════════════════════════════════════════════════════
   Phase 2: High-Level IR Construction
 ════════════════════════════════════════════════════════════
-@main(%x: Tensor[(1, 32), float32], %target: Tensor[(1), float32]) → Tensor[(1, 8), float32] {
-  %0 = nn.dense(%x, meta[param_0])  // [1,64]
-  %1 = nn.bias_add(%0, meta[param_1])  // [1,64]
-  %2 = nn.relu(%1)  // [1,64]
-  %3 = nn.dense(%2, meta[param_2])  // [1,8]
-  %4 = nn.bias_add(%3, meta[param_3])  // [1,8]
+@main(%x: Tensor[(4, 32), float32], %target: Tensor[(1), float32]) → Tensor[(4, 8), float32] {
+  %0 = nn.dense(%x, meta[param_0])  // [4,64]
+  %1 = nn.bias_add(%0, meta[param_1])  // [4,64]
+  %2 = nn.relu(%1)  // [4,64]
+  %3 = nn.dense(%2, meta[param_2])  // [4,8]
+  %4 = nn.bias_add(%3, meta[param_3])  // [4,8]
 }
 
 
@@ -449,9 +630,9 @@ Parameters: 4
     nn.dense + nn.bias_add → fused.dense_bias
 
   After fusion:
-@main(%x: Tensor[(1, 32), float32], %target: Tensor[(1), float32]) → Tensor[(1, 8), float32] {
-  %0 = fused.dense_bias_relu(%x, meta[param_0], meta[param_1])  // [1,64]  /* fused: nn.dense → nn.bias_add → nn.relu */
-  %1 = fused.dense_bias(%0, meta[param_2], meta[param_3])  // [1,8]  /* fused: nn.dense → nn.bias_add */
+@main(%x: Tensor[(4, 32), float32], %target: Tensor[(1), float32]) → Tensor[(4, 8), float32] {
+  %0 = fused.dense_bias_relu(%x, meta[param_0], meta[param_1])  // [4,64]  /* fused: nn.dense → nn.bias_add → nn.relu */
+  %1 = fused.dense_bias(%0, meta[param_2], meta[param_3])  // [4,8]  /* fused: nn.dense → nn.bias_add */
 }
 
   Summary: 2 total ops, 2 fused
@@ -473,9 +654,9 @@ Parameters: 4
 ════════════════════════════════════════════════════════════
   Lowered 2 PrimFunc(s):
 
-@fused_dense_bias_relu(A: Buffer[1,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[1,64]) {
+@fused_dense_bias_relu(A: Buffer[4,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[4,64]) {
   alloc acc: float32[1]  scope=local
-  for i in range(0, 1):
+  for i in range(0, 4):
     for j in range(0, 64):
       acc[0] = 0
       for k in range(0, 32):  // reduction
@@ -484,9 +665,9 @@ Parameters: 4
       Out[i, j] = max(acc[0], 0)
 }
 
-@fused_dense_bias(A: Buffer[1,64], W: Buffer[8,64], B: Buffer[1,8], Out: Buffer[1,8]) {
+@fused_dense_bias(A: Buffer[4,64], W: Buffer[8,64], B: Buffer[1,8], Out: Buffer[4,8]) {
   alloc acc: float32[1]  scope=local
-  for i in range(0, 1):
+  for i in range(0, 4):
     for j in range(0, 8):
       acc[0] = 0
       for k in range(0, 64):  // reduction
@@ -515,10 +696,10 @@ Parameters: 4
     (partial sums merged after parallel reduction)
 
   Scheduled TIR:
-@fused_dense_bias_relu(A: Buffer[1,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[1,64]) {
+@fused_dense_bias_relu(A: Buffer[4,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[4,64]) {
   alloc acc: float32[1]  scope=local
   alloc W_local: float32[32,32]  scope=local
-  for i in range(0, 1):
+  for i in range(0, 4):
     for j_outer in range(0, 2):  // parallel
       for _jl_cr in range(0, 32):
         for _kl_cr in range(0, 32):
@@ -526,14 +707,14 @@ Parameters: 4
       for j_inner in range(0, 32):
         acc[0] = 0
         for k in range(0, 32):  // reduction
-          acc[0] = (acc[0] + (A[i, k] * W[((j_outer * 32) + j_inner), k]))
+          acc[0] = (acc[0] + (A[i, k] * W_local[j_inner, k]))
         acc[0] = (acc[0] + B[0, ((j_outer * 32) + j_inner)])
         Out[i, ((j_outer * 32) + j_inner)] = max(acc[0], 0)
 }
 
-@fused_dense_bias(A: Buffer[1,64], W: Buffer[8,64], B: Buffer[1,8], Out: Buffer[1,8]) {
+@fused_dense_bias(A: Buffer[4,64], W: Buffer[8,64], B: Buffer[1,8], Out: Buffer[4,8]) {
   alloc acc: float32[1]  scope=local
-  for i in range(0, 1):
+  for i in range(0, 4):
     for j in range(0, 8):
       acc[0] = 0
       for k in range(0, 64):  // reduction
@@ -568,67 +749,102 @@ Parameters: 4
   Phase 7: Auto-Tuning (Simulated Annealing)
 ════════════════════════════════════════════════════════════
   Auto-tuning fused_dense_bias_relu (simulated annealing)...
-    Search space: 7 × 6 × 2 = 84 configs
-    Strategy: 2 restarts × 30 iterations
+    Search space: 3×7×6×2(unroll)×2(W_local) = 504 configs
+    Strategy: 3 restarts × 50 iterations
     Cooling: T₀=1, rate=0.92
-    Naive baseline: 0.0149ms
-    Restart 1: best=0.0058ms [tile(64,16)+unroll]
-    Restart 2: best=0.0082ms [tile(2,16)+unroll]
+    Naive baseline: 0.0175ms
+    Restart 1: best=0.0072ms [tile(i=4,j=32,k=32)+unroll]
+    Restart 2: best=0.0065ms [tile(i=2,j=8,k=4)+unroll]
+    Restart 3: best=0.0067ms [tile(i=4,j=1,k=4)+W_local+unroll]
     ───────────────────────────────
-    Best overall: 0.0058ms [tile(64,16)+unroll]
-    Speedup vs naive: 2.57x
+    Best overall: 0.0065ms [tile(i=2,j=8,k=4)+unroll]
+    Speedup vs naive: 2.69x
 Search Progress:
-  [  0] ▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░ 0.0085ms  T=1.000  acc=3/3
-  [  3] ▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░ 0.0085ms  T=0.779  acc=2/3
-  [  6] ▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░ 0.0084ms  T=0.606  acc=2/3
-  [  9] ▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░ 0.0084ms  T=0.472  acc=3/3
-  [ 12] ▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░ 0.0084ms  T=0.368  acc=2/3
-  [ 15] ▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░ 0.0084ms  T=0.286  acc=3/3
-  [ 18] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░ 0.0058ms  T=0.223  acc=3/3
-  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░ 0.0058ms  T=0.174  acc=2/3
-  [ 24] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░ 0.0058ms  T=0.135  acc=1/3
-  [ 27] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░ 0.0058ms  T=0.105  acc=3/3
-  [ 30] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░ 0.0058ms  T=1.000  acc=3/3
-  [ 33] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░ 0.0058ms  T=0.779  acc=2/3
-  [ 36] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░ 0.0058ms  T=0.606  acc=3/3
-  [ 39] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░ 0.0058ms  T=0.472  acc=3/3
-  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░ 0.0058ms  T=0.368  acc=1/3
-  [ 45] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░ 0.0058ms  T=0.286  acc=3/3
-  [ 48] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░ 0.0058ms  T=0.223  acc=1/3
-  [ 51] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░ 0.0058ms  T=0.174  acc=0/3
-  [ 54] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░ 0.0058ms  T=0.135  acc=1/3
-  [ 57] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░ 0.0058ms  T=0.105  acc=0/3
+  [  0] ▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░ 0.0072ms  T=1.000  acc=6/7
+  [  7] ▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░ 0.0072ms  T=0.558  acc=5/7
+  [ 14] ▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░ 0.0072ms  T=0.311  acc=6/7
+  [ 21] ▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░ 0.0072ms  T=0.174  acc=5/7
+  [ 28] ▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░ 0.0072ms  T=0.097  acc=3/7
+  [ 35] ▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░ 0.0072ms  T=0.054  acc=3/7
+  [ 42] ▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░ 0.0072ms  T=0.030  acc=5/7
+  [ 49] ▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░ 0.0072ms  T=0.017  acc=5/7
+  [ 56] ▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░ 0.0072ms  T=0.606  acc=3/7
+  [ 63] ▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░ 0.0068ms  T=0.338  acc=3/7
+  [ 70] ▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.189  acc=4/7
+  [ 77] ▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.105  acc=2/7
+  [ 84] ▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.059  acc=1/7
+  [ 91] ▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.033  acc=3/7
+  [ 98] ▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.018  acc=4/7
+  [105] ▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.659  acc=4/7
+  [112] ▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.368  acc=4/7
+  [119] ▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.205  acc=3/7
+  [126] ▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.114  acc=2/7
+  [133] ▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.064  acc=3/7
+  [140] ▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.036  acc=3/7
+  [147] ▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.020  acc=2/3
   Auto-tuning fused_dense_bias (simulated annealing)...
-    Search space: 4 × 7 × 2 = 56 configs
-    Strategy: 2 restarts × 30 iterations
+    Search space: 3×4×7×2(unroll)×2(W_local) = 336 configs
+    Strategy: 3 restarts × 50 iterations
     Cooling: T₀=1, rate=0.92
-    Naive baseline: 0.0023ms
-    Restart 1: best=0.0020ms [tile(8,2)]
-    Restart 2: best=0.0019ms [tile(1,64)+unroll]
+    Naive baseline: 0.0032ms
+    Restart 1: best=0.0019ms [tile(i=2,j=8,k=16)]
+    Restart 2: best=0.0016ms [tile(i=1,j=2,k=4)+unroll]
+    Restart 3: best=0.0019ms [tile(i=2,j=1,k=64)+W_local+unroll]
     ───────────────────────────────
-    Best overall: 0.0019ms [tile(1,64)+unroll]
-    Speedup vs naive: 1.21x
+    Best overall: 0.0016ms [tile(i=1,j=2,k=4)+unroll]
+    Speedup vs naive: 2.00x
 Search Progress:
-  [  0] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0022ms  T=1.000  acc=2/3
-  [  3] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0022ms  T=0.779  acc=1/3
-  [  6] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0022ms  T=0.606  acc=1/3
-  [  9] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0022ms  T=0.472  acc=1/3
-  [ 12] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0022ms  T=0.368  acc=1/3
-  [ 15] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0020ms  T=0.286  acc=2/3
-  [ 18] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0020ms  T=0.223  acc=1/3
-  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0020ms  T=0.174  acc=0/3
-  [ 24] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0020ms  T=0.135  acc=2/3
-  [ 27] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0020ms  T=0.105  acc=1/3
-  [ 30] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0020ms  T=1.000  acc=2/3
-  [ 33] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0020ms  T=0.779  acc=1/3
-  [ 36] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0020ms  T=0.606  acc=3/3
-  [ 39] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0020ms  T=0.472  acc=3/3
-  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0020ms  T=0.368  acc=3/3
-  [ 45] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0020ms  T=0.286  acc=1/3
-  [ 48] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0019ms  T=0.223  acc=3/3
-  [ 51] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0019ms  T=0.174  acc=0/3
-  [ 54] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0019ms  T=0.135  acc=2/3
-  [ 57] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 0.0019ms  T=0.105  acc=3/3
+  [  0] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=1.000  acc=7/7
+  [  7] ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ 0.0065ms  T=0.558  acc=7/7
+  [ 14] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░ 0.0039ms  T=0.311  acc=4/7
+  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0019ms  T=0.174  acc=2/7
+  [ 28] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0019ms  T=0.097  acc=0/7
+  [ 35] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0019ms  T=0.054  acc=1/7
+  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0019ms  T=0.030  acc=1/7
+  [ 49] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0019ms  T=0.017  acc=6/7
+  [ 56] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0019ms  T=0.606  acc=6/7
+  [ 63] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0019ms  T=0.338  acc=7/7
+  [ 70] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0019ms  T=0.189  acc=5/7
+  [ 77] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0019ms  T=0.105  acc=5/7
+  [ 84] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0019ms  T=0.059  acc=4/7
+  [ 91] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░ 0.0019ms  T=0.033  acc=2/7
+  [ 98] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.018  acc=4/7
+  [105] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.659  acc=3/7
+  [112] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.368  acc=2/7
+  [119] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.205  acc=2/7
+  [126] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.114  acc=2/7
+  [133] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.064  acc=2/7
+  [140] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.036  acc=1/7
+  [147] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.020  acc=0/3
+
+── 7.1 Tuner-selected TIR → feeds Phase 8 & Phase 9 ──
+@fused_dense_bias_relu(A: Buffer[4,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[4,64]) {
+  alloc acc: float32[1]  scope=local
+  for i_outer in range(0, 2):
+    for j_outer in range(0, 8):
+      for i_inner in range(0, 2):
+        for j_inner in range(0, 8):  // unroll
+          acc[0] = 0
+          for k_outer in range(0, 8):  // reduction
+            for k_inner in range(0, 4):  // reduction
+              acc[0] = (acc[0] + (A[((i_outer * 2) + i_inner), ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner), ((k_outer * 4) + k_inner)]))
+          acc[0] = (acc[0] + B[0, ((j_outer * 8) + j_inner)])
+          Out[((i_outer * 2) + i_inner), ((j_outer * 8) + j_inner)] = max(acc[0], 0)
+}
+
+@fused_dense_bias(A: Buffer[4,64], W: Buffer[8,64], B: Buffer[1,8], Out: Buffer[4,8]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 4):
+    for j_outer in range(0, 4):
+      for j_inner in range(0, 2):  // unroll
+        acc[0] = 0
+        for k_outer in range(0, 16):  // reduction
+          for k_inner in range(0, 4):  // reduction
+            acc[0] = (acc[0] + (A[i, ((k_outer * 4) + k_inner)] * W[((j_outer * 2) + j_inner), ((k_outer * 4) + k_inner)]))
+        acc[0] = (acc[0] + B[0, ((j_outer * 2) + j_inner)])
+        Out[i, ((j_outer * 2) + j_inner)] = acc[0]
+}
+
 
 ════════════════════════════════════════════════════════════
   Phase 8: Code Generation (→ JavaScript)
@@ -637,14 +853,14 @@ Search Progress:
 ── Naive (unoptimized) code ──
 function fused_dense_bias_relu(A, W, B, Out) {
   // Buffer shapes:
-  // A: [1, 32] (global)
+  // A: [4, 32] (global)
   // W: [64, 32] (global)
   // B: [1, 64] (global)
-  // Out: [1, 64] (global)
+  // Out: [4, 64] (global)
   
   const acc = new Float32Array(1); // local
   
-  for (let i = 0; i < 1; i++) {
+  for (let i = 0; i < 4; i++) {
     for (let j = 0; j < 64; j++) {
       acc[0] = 0;
       for (let k = 0; k < 32; k++) {
@@ -658,14 +874,14 @@ function fused_dense_bias_relu(A, W, B, Out) {
 
 function fused_dense_bias(A, W, B, Out) {
   // Buffer shapes:
-  // A: [1, 64] (global)
+  // A: [4, 64] (global)
   // W: [8, 64] (global)
   // B: [1, 8] (global)
-  // Out: [1, 8] (global)
+  // Out: [4, 8] (global)
   
   const acc = new Float32Array(1); // local
   
-  for (let i = 0; i < 1; i++) {
+  for (let i = 0; i < 4; i++) {
     for (let j = 0; j < 8; j++) {
       acc[0] = 0;
       for (let k = 0; k < 64; k++) {
@@ -678,31 +894,100 @@ function fused_dense_bias(A, W, B, Out) {
 }
 
 
-── Scheduled + Optimized code ──
+── Scheduled + Optimized code (tuner-selected schedule) ──
 function fused_dense_bias_relu(A, W, B, Out) {
   // Buffer shapes:
-  // A: [1, 32] (global)
+  // A: [4, 32] (global)
   // W: [64, 32] (global)
   // B: [1, 64] (global)
-  // Out: [1, 64] (global)
+  // Out: [4, 64] (global)
   
-  const W_local = new Float32Array(1024); // local
   let acc = 0; // scalar (promoted from buffer)
   
-  for (let i = 0; i < 1; i++) {
-    for (let j_outer = 0; j_outer < 2; j_outer++) { /* parallel */
-      for (let _jl_cr = 0; _jl_cr < 32; _jl_cr++) {
-        for (let _kl_cr = 0; _kl_cr < 32; _kl_cr++) {
-          W_local[_jl_cr * 32 + _kl_cr] = W[((j_outer * 32) + _jl_cr) * 32 + _kl_cr];
+  for (let i_outer = 0; i_outer < 2; i_outer++) {
+    for (let j_outer = 0; j_outer < 8; j_outer++) {
+      for (let i_inner = 0; i_inner < 2; i_inner++) {
+        // unrolled loop j_inner (8 iterations)
+        { const j_inner = 0;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 2) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 2) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
         }
-      }
-      for (let j_inner = 0; j_inner < 32; j_inner++) {
-        acc = 0;
-        for (let k = 0; k < 32; k++) {
-          acc = (acc + (A[i * 32 + k] * W[((j_outer * 32) + j_inner) * 32 + k]));
+        { const j_inner = 1;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 2) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 2) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
         }
-        acc = (acc + B[0 * 64 + ((j_outer * 32) + j_inner)]);
-        Out[i * 64 + ((j_outer * 32) + j_inner)] = Math.max(acc, 0);
+        { const j_inner = 2;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 2) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 2) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+        }
+        { const j_inner = 3;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 2) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 2) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+        }
+        { const j_inner = 4;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 2) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 2) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+        }
+        { const j_inner = 5;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 2) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 2) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+        }
+        { const j_inner = 6;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 2) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 2) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+        }
+        { const j_inner = 7;
+          acc = 0;
+          for (let k_outer = 0; k_outer < 8; k_outer++) {
+            for (let k_inner = 0; k_inner < 4; k_inner++) {
+              acc = (acc + (A[((i_outer * 2) + i_inner) * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+            }
+          }
+          acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+          Out[((i_outer * 2) + i_inner) * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+        }
       }
     }
   }
@@ -710,21 +995,36 @@ function fused_dense_bias_relu(A, W, B, Out) {
 
 function fused_dense_bias(A, W, B, Out) {
   // Buffer shapes:
-  // A: [1, 64] (global)
+  // A: [4, 64] (global)
   // W: [8, 64] (global)
   // B: [1, 8] (global)
-  // Out: [1, 8] (global)
+  // Out: [4, 8] (global)
   
   let acc = 0; // scalar (promoted from buffer)
   
-  for (let i = 0; i < 1; i++) {
-    for (let j = 0; j < 8; j++) {
-      acc = 0;
-      for (let k = 0; k < 64; k++) {
-        acc = (acc + (A[i * 64 + k] * W[j * 64 + k]));
+  for (let i = 0; i < 4; i++) {
+    for (let j_outer = 0; j_outer < 4; j_outer++) {
+      // unrolled loop j_inner (2 iterations)
+      { const j_inner = 0;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 16; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 64 + ((k_outer * 4) + k_inner)] * W[((j_outer * 2) + j_inner) * 64 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 8 + ((j_outer * 2) + j_inner)]);
+        Out[i * 8 + ((j_outer * 2) + j_inner)] = acc;
       }
-      acc = (acc + B[0 * 8 + j]);
-      Out[i * 8 + j] = acc;
+      { const j_inner = 1;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 16; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 64 + ((k_outer * 4) + k_inner)] * W[((j_outer * 2) + j_inner) * 64 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 8 + ((j_outer * 2) + j_inner)]);
+        Out[i * 8 + ((j_outer * 2) + j_inner)] = acc;
+      }
     }
   }
 }
@@ -734,9 +1034,9 @@ function fused_dense_bias(A, W, B, Out) {
 function fused_dense_bias_relu_reg4(A, W, B, Out) {
   // Register-tiled: 4-way accumulator unrolling
   // Loads A[k] once, reuses for 4 output elements → 4× fewer A reads
-  for (let i = 0; i < 1; i++) {
+  for (let i = 0; i < 4; i++) {
     for (let j = 0; j < 64; j += 4) {
-      let acc0 = acc1 = acc2 = acc3 = 0;
+      let acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
       for (let k = 0; k < 32; k++) {
         const a = A[i * 32 + k]; // load once, reuse 4x
         acc0 += a * W[(j + 0) * 32 + k];
@@ -759,9 +1059,9 @@ function fused_dense_bias_relu_reg4(A, W, B, Out) {
 function fused_dense_bias_reg4(A, W, B, Out) {
   // Register-tiled: 4-way accumulator unrolling
   // Loads A[k] once, reuses for 4 output elements → 4× fewer A reads
-  for (let i = 0; i < 1; i++) {
+  for (let i = 0; i < 4; i++) {
     for (let j = 0; j < 8; j += 4) {
-      let acc0 = acc1 = acc2 = acc3 = 0;
+      let acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
       for (let k = 0; k < 64; k++) {
         const a = A[i * 64 + k]; // load once, reuse 4x
         acc0 += a * W[(j + 0) * 64 + k];
@@ -788,32 +1088,38 @@ function fused_dense_bias_reg4(A, W, B, Out) {
 
 ── Per-Kernel Memory Analysis ──
 Memory Analysis for fused_dense_bias_relu:
-  Total buffer size: 8.6 KB
-    A[1,32]: 128 B (input)
+  Total buffer size: 9.8 KB
+    A[4,32]: 512 B (input)
     W[64,32]: 8.0 KB (input)
     B[1,64]: 256 B (input)
-    Out[1,64]: 256 B (output)
-    acc[1]: 4 B (local)
+    Out[4,64]: 1.0 KB (output)
 
-  FLOP count: 4,224
-  Memory traffic: 33.5 KB (6,336 reads, 2,240 writes)
-  Arithmetic intensity: 0.12 FLOP/byte
-  Working set: 1.0 KB
+  FLOP count: 16,896
+  Memory traffic (naive):     66.0 KB (16,640 reads, 256 writes)
+  Memory traffic (effective):  42.0 KB  [after tiling(j,8), scalar_promotion]
+  Arithmetic intensity (naive):     0.25 FLOP/byte
+  Arithmetic intensity (effective): 0.39 FLOP/byte  ← cache-aware
+  Note: scalar_promotion eliminates Float32Array heap alloc → register variable.
+        Reduces per-call overhead; speedup exceeds what FLOP/byte AI predicts.
+  Working set: 1.2 KB
   Cache fitness: L1 ✓
   Bottleneck: 🧊 MEMORY-BOUND
 
 Memory Analysis for fused_dense_bias:
-  Total buffer size: 2.3 KB
-    A[1,64]: 256 B (input)
+  Total buffer size: 3.2 KB
+    A[4,64]: 1.0 KB (input)
     W[8,64]: 2.0 KB (input)
     B[1,8]: 32 B (input)
-    Out[1,8]: 32 B (output)
-    acc[1]: 4 B (local)
+    Out[4,8]: 128 B (output)
 
-  FLOP count: 1,032
-  Memory traffic: 8.2 KB (1,560 reads, 536 writes)
-  Arithmetic intensity: 0.12 FLOP/byte
-  Working set: 128 B
+  FLOP count: 4,128
+  Memory traffic (naive):     16.3 KB (4,128 reads, 32 writes)
+  Memory traffic (effective):  10.3 KB  [after tiling(j,2), scalar_promotion]
+  Arithmetic intensity (naive):     0.25 FLOP/byte
+  Arithmetic intensity (effective): 0.39 FLOP/byte  ← cache-aware
+  Note: scalar_promotion eliminates Float32Array heap alloc → register variable.
+        Reduces per-call overhead; speedup exceeds what FLOP/byte AI predicts.
+  Working set: 776 B
   Cache fitness: L1 ✓
   Bottleneck: 🧊 MEMORY-BOUND
 
@@ -828,6 +1134,9 @@ Memory Analysis for fused_dense_bias:
   Peak bandwidth:  20 GB/s
   Ridge point:     0.50 FLOP/byte
 
+  ⚠  Timing: tuner-selected scheduled TIR (via compile()).
+     Main benchmark uses register-tiled path (compileRegTile) — see VERIFICATION.
+
   GFLOPS
   10.0 ┤─────────────── compute roof ─────────────────
     8.8 ┤ 
@@ -835,47 +1144,52 @@ Memory Analysis for fused_dense_bias:
     6.3 ┤ 
     5.0 ┤    / (AI=0.25)
     3.8 ┤    / (AI=0.19)
-    2.5 ┤    / (AI=0.13)
+    2.5 ┤  ★ fused_dense_bias  ★ fused_dense_bias_relu    / (AI=0.13)
     1.3 ┤    / (AI=0.06)
-    0.0 ┤  ★ fused_dense_bias  ★ fused_dense_bias_relu    / (AI=0.00)
+    0.0 ┤    / (AI=0.00)
         └────────────────────────────────────────────
          0.01  0.1   0.5   1.0   5.0   10.0
                  Arithmetic Intensity (FLOP/byte)
 
   ┌──────────────────────────┬──────────┬──────────┬──────────┬─────────────────────────────┐
-  │ Kernel                   │ Time(ms) │  GFLOPS  │ AI(F/B)  │ Efficiency                  │
+  │ Kernel                   │ Time(ms) │  GFLOPS  │ AI(F/B)* │ Efficiency                  │
   ├──────────────────────────┼──────────┼──────────┼──────────┼─────────────────────────────┤
-  │ fused_dense_bias_relu    │   0.0137 │    0.308 │     0.12 │ [███░░░░░░░░░░░░░░░░░] 12.5% │
-  │ fused_dense_bias         │   0.0022 │    0.469 │     0.12 │ [████░░░░░░░░░░░░░░░░] 19.1% │
+  │ fused_dense_bias_relu    │   0.0066 │    2.560 │     0.25 │ [███████░░░░░░░░░░░░░] 32.6% │
+  │                          │          │          │ eff:0.39 │                             │
+  │ fused_dense_bias         │   0.0016 │    2.580 │     0.25 │ [███████░░░░░░░░░░░░░] 32.8% │
+  │                          │          │          │ eff:0.39 │                             │
   └──────────────────────────┴──────────┴──────────┴──────────┴─────────────────────────────┘
+  * AI(F/B) = intrinsic (naive) arithmetic intensity — algorithm-level, schedule-independent.
 
   🧊 Memory-bound kernels (2): fused_dense_bias_relu, fused_dense_bias
-     → Recommendation: increase tiling, add cache_read, layout transform
+     fused_dense_bias_relu: applied: [tiling(j,8), scalar_promotion]  → still consider: cache_read
+     fused_dense_bias: applied: [tiling(j,2), scalar_promotion]  → still consider: cache_read
 
 ════════════════════════════════════════════════════════════
   VERIFICATION
 ════════════════════════════════════════════════════════════
 
 ── Compiled Forward Verification ──
-  NDArray naive result: [-0.039303332567214966, -0.47727593779563904, -0.1741827428340912, 0.8969999551773071, -0.6071835160255432...]
+  NDArray naive result: [-0.3698216378688812, -0.12050438672304153, -0.034433186054229736, -0.2924205958843231, -0.29498937726020813...]
   Compiled naive match: ✓
   Compiled scheduled match: ✓
 
 ── Benchmark ──
-  NDArray naive:       0.0168ms / inference
-  Compiled naive:      0.0161ms / inference
-    Speedup vs NDArray: 1.0x
-  Compiled scheduled:  0.0209ms / inference
-    Speedup vs NDArray: 0.8x
+  NDArray naive:       0.0289ms / inference
+  Compiled naive:      0.0092ms / inference
+    Speedup vs NDArray: 3.1x
+  Compiled scheduled:  0.0067ms / inference
+    Speedup vs NDArray: 4.3x
+    Speedup vs compiled naive: 1.37x
 
 ── Autograd Training Verification ──
   Training multiclass classifier for 5 steps...
-    Step 0: loss=3.029386 grads=✓
-    Step 1: loss=1.218410 grads=✓
-    Step 2: loss=0.616740 grads=✓
-    Step 3: loss=0.302512 grads=✓
-    Step 4: loss=0.168627 grads=✓
-  Loss changing: ✓ (3.0294 → 0.1686)
+    Step 0: loss=2.140729 grads=✓
+    Step 1: loss=1.588801 grads=✓
+    Step 2: loss=1.242143 grads=✓
+    Step 3: loss=1.022042 grads=✓
+    Step 4: loss=0.883306 grads=✓
+  Loss changing: ✓ (2.1407 → 0.8833)
 
 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 ▓  MULTILABEL CLASSIFIER — MLC Pipeline
@@ -885,20 +1199,20 @@ Memory Analysis for fused_dense_bias:
   Phase 1: Model Tracing (Capture Computation Graph)
 ════════════════════════════════════════════════════════════
 ═══ Traced Computation Graph ═══
-Input: id=620 shape=[1,32]
-Target: id=621
+Input: id=4120 shape=[4,32]
+Target: id=4121
 
 ── Forward ──
-  %622 = nn.dense(%620, %616) → [1,64]
-  %623 = bias_add(%622, %617) → [1,64]
-  %624 = relu(%623) → [1,64]
-  %625 = nn.dense(%624, %618) → [1,8]
-  %626 = bias_add(%625, %619) → [1,8]
+  %4122 = nn.dense(%4120, %4116) → [4,64]
+  %4123 = bias_add(%4122, %4117) → [4,64]
+  %4124 = relu(%4123) → [4,64]
+  %4125 = nn.dense(%4124, %4118) → [4,8]
+  %4126 = bias_add(%4125, %4119) → [4,8]
 ── Loss ──
-  %627 = bce_with_logits(%626, %621) → [1]
+  %4127 = bce_with_logits(%4126, %4121) → [1]
 
-Output: id=626 shape=[1,8]
-Loss: id=627
+Output: id=4126 shape=[4,8]
+Loss: id=4127
 Parameters: 4
   param_0: [64,32]
   param_1: [1,64]
@@ -908,12 +1222,12 @@ Parameters: 4
 ════════════════════════════════════════════════════════════
   Phase 2: High-Level IR Construction
 ════════════════════════════════════════════════════════════
-@main(%x: Tensor[(1, 32), float32], %target: Tensor[(1), float32]) → Tensor[(1, 8), float32] {
-  %0 = nn.dense(%x, meta[param_0])  // [1,64]
-  %1 = nn.bias_add(%0, meta[param_1])  // [1,64]
-  %2 = nn.relu(%1)  // [1,64]
-  %3 = nn.dense(%2, meta[param_2])  // [1,8]
-  %4 = nn.bias_add(%3, meta[param_3])  // [1,8]
+@main(%x: Tensor[(4, 32), float32], %target: Tensor[(1), float32]) → Tensor[(4, 8), float32] {
+  %0 = nn.dense(%x, meta[param_0])  // [4,64]
+  %1 = nn.bias_add(%0, meta[param_1])  // [4,64]
+  %2 = nn.relu(%1)  // [4,64]
+  %3 = nn.dense(%2, meta[param_2])  // [4,8]
+  %4 = nn.bias_add(%3, meta[param_3])  // [4,8]
 }
 
 
@@ -930,9 +1244,9 @@ Parameters: 4
     nn.dense + nn.bias_add → fused.dense_bias
 
   After fusion:
-@main(%x: Tensor[(1, 32), float32], %target: Tensor[(1), float32]) → Tensor[(1, 8), float32] {
-  %0 = fused.dense_bias_relu(%x, meta[param_0], meta[param_1])  // [1,64]  /* fused: nn.dense → nn.bias_add → nn.relu */
-  %1 = fused.dense_bias(%0, meta[param_2], meta[param_3])  // [1,8]  /* fused: nn.dense → nn.bias_add */
+@main(%x: Tensor[(4, 32), float32], %target: Tensor[(1), float32]) → Tensor[(4, 8), float32] {
+  %0 = fused.dense_bias_relu(%x, meta[param_0], meta[param_1])  // [4,64]  /* fused: nn.dense → nn.bias_add → nn.relu */
+  %1 = fused.dense_bias(%0, meta[param_2], meta[param_3])  // [4,8]  /* fused: nn.dense → nn.bias_add */
 }
 
   Summary: 2 total ops, 2 fused
@@ -954,9 +1268,9 @@ Parameters: 4
 ════════════════════════════════════════════════════════════
   Lowered 2 PrimFunc(s):
 
-@fused_dense_bias_relu(A: Buffer[1,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[1,64]) {
+@fused_dense_bias_relu(A: Buffer[4,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[4,64]) {
   alloc acc: float32[1]  scope=local
-  for i in range(0, 1):
+  for i in range(0, 4):
     for j in range(0, 64):
       acc[0] = 0
       for k in range(0, 32):  // reduction
@@ -965,9 +1279,9 @@ Parameters: 4
       Out[i, j] = max(acc[0], 0)
 }
 
-@fused_dense_bias(A: Buffer[1,64], W: Buffer[8,64], B: Buffer[1,8], Out: Buffer[1,8]) {
+@fused_dense_bias(A: Buffer[4,64], W: Buffer[8,64], B: Buffer[1,8], Out: Buffer[4,8]) {
   alloc acc: float32[1]  scope=local
-  for i in range(0, 1):
+  for i in range(0, 4):
     for j in range(0, 8):
       acc[0] = 0
       for k in range(0, 64):  // reduction
@@ -996,10 +1310,10 @@ Parameters: 4
     (partial sums merged after parallel reduction)
 
   Scheduled TIR:
-@fused_dense_bias_relu(A: Buffer[1,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[1,64]) {
+@fused_dense_bias_relu(A: Buffer[4,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[4,64]) {
   alloc acc: float32[1]  scope=local
   alloc W_local: float32[32,32]  scope=local
-  for i in range(0, 1):
+  for i in range(0, 4):
     for j_outer in range(0, 2):  // parallel
       for _jl_cr in range(0, 32):
         for _kl_cr in range(0, 32):
@@ -1007,14 +1321,14 @@ Parameters: 4
       for j_inner in range(0, 32):
         acc[0] = 0
         for k in range(0, 32):  // reduction
-          acc[0] = (acc[0] + (A[i, k] * W[((j_outer * 32) + j_inner), k]))
+          acc[0] = (acc[0] + (A[i, k] * W_local[j_inner, k]))
         acc[0] = (acc[0] + B[0, ((j_outer * 32) + j_inner)])
         Out[i, ((j_outer * 32) + j_inner)] = max(acc[0], 0)
 }
 
-@fused_dense_bias(A: Buffer[1,64], W: Buffer[8,64], B: Buffer[1,8], Out: Buffer[1,8]) {
+@fused_dense_bias(A: Buffer[4,64], W: Buffer[8,64], B: Buffer[1,8], Out: Buffer[4,8]) {
   alloc acc: float32[1]  scope=local
-  for i in range(0, 1):
+  for i in range(0, 4):
     for j in range(0, 8):
       acc[0] = 0
       for k in range(0, 64):  // reduction
@@ -1048,9 +1362,100 @@ Parameters: 4
 ════════════════════════════════════════════════════════════
   Phase 7: Auto-Tuning (Simulated Annealing)
 ════════════════════════════════════════════════════════════
-  [Skipped — pass runAutoTune=true to enable]
-  Now uses simulated annealing with multi-start restarts.
-  Run with runAutoTune=true to see convergence curves.
+  Auto-tuning fused_dense_bias_relu (simulated annealing)...
+    Search space: 3×7×6×2(unroll)×2(W_local) = 504 configs
+    Strategy: 3 restarts × 50 iterations
+    Cooling: T₀=1, rate=0.92
+    Naive baseline: 0.0065ms
+    Restart 1: best=0.0064ms [tile(i=1,j=8,k=4)+unroll]
+    Restart 2: best=0.0064ms [tile(i=1,j=8,k=4)+unroll]
+    Restart 3: best=0.0098ms [tile(i=2,j=16,k=16)+W_local]
+    ───────────────────────────────
+    Best overall: 0.0064ms [tile(i=1,j=8,k=4)+unroll]
+    Speedup vs naive: 1.02x
+Search Progress:
+  [  0] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░ 0.0072ms  T=1.000  acc=4/7
+  [  7] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░ 0.0072ms  T=0.558  acc=1/7
+  [ 14] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░ 0.0072ms  T=0.311  acc=5/7
+  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.174  acc=3/7
+  [ 28] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.097  acc=3/7
+  [ 35] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.054  acc=1/7
+  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.030  acc=1/7
+  [ 49] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.017  acc=3/7
+  [ 56] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.606  acc=4/7
+  [ 63] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.338  acc=3/7
+  [ 70] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.189  acc=1/7
+  [ 77] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.105  acc=1/7
+  [ 84] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.059  acc=2/7
+  [ 91] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.033  acc=2/7
+  [ 98] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.018  acc=3/7
+  [105] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.659  acc=3/7
+  [112] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.368  acc=5/7
+  [119] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.205  acc=2/7
+  [126] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.114  acc=3/7
+  [133] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.064  acc=4/7
+  [140] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.036  acc=2/7
+  [147] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 0.0064ms  T=0.020  acc=1/3
+  Auto-tuning fused_dense_bias (simulated annealing)...
+    Search space: 3×4×7×2(unroll)×2(W_local) = 336 configs
+    Strategy: 3 restarts × 50 iterations
+    Cooling: T₀=1, rate=0.92
+    Naive baseline: 0.0036ms
+    Restart 1: best=0.0015ms [tile(i=1,j=1,k=1)]
+    Restart 2: best=0.0017ms [tile(i=1,j=8,k=16)]
+    Restart 3: best=0.0022ms [tile(i=4,j=1,k=2)+unroll]
+    ───────────────────────────────
+    Best overall: 0.0015ms [tile(i=1,j=1,k=1)]
+    Speedup vs naive: 2.40x
+Search Progress:
+  [  0] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=1.000  acc=4/7
+  [  7] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░ 0.0016ms  T=0.558  acc=5/7
+  [ 14] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.311  acc=4/7
+  [ 21] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.174  acc=4/7
+  [ 28] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.097  acc=5/7
+  [ 35] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.054  acc=4/7
+  [ 42] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.030  acc=0/7
+  [ 49] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.017  acc=5/7
+  [ 56] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.606  acc=6/7
+  [ 63] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.338  acc=3/7
+  [ 70] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.189  acc=0/7
+  [ 77] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.105  acc=0/7
+  [ 84] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.059  acc=3/7
+  [ 91] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.033  acc=4/7
+  [ 98] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.018  acc=6/7
+  [105] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.659  acc=6/7
+  [112] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.368  acc=6/7
+  [119] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.205  acc=4/7
+  [126] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.114  acc=3/7
+  [133] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.064  acc=4/7
+  [140] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.036  acc=2/7
+  [147] ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░ 0.0015ms  T=0.020  acc=1/3
+
+── 7.1 Tuner-selected TIR → feeds Phase 8 & Phase 9 ──
+@fused_dense_bias_relu(A: Buffer[4,32], W: Buffer[64,32], B: Buffer[1,64], Out: Buffer[4,64]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 4):
+    for j_outer in range(0, 8):
+      for j_inner in range(0, 8):  // unroll
+        acc[0] = 0
+        for k_outer in range(0, 8):  // reduction
+          for k_inner in range(0, 4):  // reduction
+            acc[0] = (acc[0] + (A[i, ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner), ((k_outer * 4) + k_inner)]))
+        acc[0] = (acc[0] + B[0, ((j_outer * 8) + j_inner)])
+        Out[i, ((j_outer * 8) + j_inner)] = max(acc[0], 0)
+}
+
+@fused_dense_bias(A: Buffer[4,64], W: Buffer[8,64], B: Buffer[1,8], Out: Buffer[4,8]) {
+  alloc acc: float32[1]  scope=local
+  for i in range(0, 4):
+    for j in range(0, 8):
+      acc[0] = 0
+      for k in range(0, 64):  // reduction
+        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
+      acc[0] = (acc[0] + B[0, j])
+      Out[i, j] = acc[0]
+}
+
 
 ════════════════════════════════════════════════════════════
   Phase 8: Code Generation (→ JavaScript)
@@ -1059,14 +1464,14 @@ Parameters: 4
 ── Naive (unoptimized) code ──
 function fused_dense_bias_relu(A, W, B, Out) {
   // Buffer shapes:
-  // A: [1, 32] (global)
+  // A: [4, 32] (global)
   // W: [64, 32] (global)
   // B: [1, 64] (global)
-  // Out: [1, 64] (global)
+  // Out: [4, 64] (global)
   
   const acc = new Float32Array(1); // local
   
-  for (let i = 0; i < 1; i++) {
+  for (let i = 0; i < 4; i++) {
     for (let j = 0; j < 64; j++) {
       acc[0] = 0;
       for (let k = 0; k < 32; k++) {
@@ -1080,14 +1485,14 @@ function fused_dense_bias_relu(A, W, B, Out) {
 
 function fused_dense_bias(A, W, B, Out) {
   // Buffer shapes:
-  // A: [1, 64] (global)
+  // A: [4, 64] (global)
   // W: [8, 64] (global)
   // B: [1, 8] (global)
-  // Out: [1, 8] (global)
+  // Out: [4, 8] (global)
   
   const acc = new Float32Array(1); // local
   
-  for (let i = 0; i < 1; i++) {
+  for (let i = 0; i < 4; i++) {
     for (let j = 0; j < 8; j++) {
       acc[0] = 0;
       for (let k = 0; k < 64; k++) {
@@ -1100,31 +1505,98 @@ function fused_dense_bias(A, W, B, Out) {
 }
 
 
-── Scheduled + Optimized code ──
+── Scheduled + Optimized code (tuner-selected schedule) ──
 function fused_dense_bias_relu(A, W, B, Out) {
   // Buffer shapes:
-  // A: [1, 32] (global)
+  // A: [4, 32] (global)
   // W: [64, 32] (global)
   // B: [1, 64] (global)
-  // Out: [1, 64] (global)
+  // Out: [4, 64] (global)
   
-  const W_local = new Float32Array(1024); // local
   let acc = 0; // scalar (promoted from buffer)
   
-  for (let i = 0; i < 1; i++) {
-    for (let j_outer = 0; j_outer < 2; j_outer++) { /* parallel */
-      for (let _jl_cr = 0; _jl_cr < 32; _jl_cr++) {
-        for (let _kl_cr = 0; _kl_cr < 32; _kl_cr++) {
-          W_local[_jl_cr * 32 + _kl_cr] = W[((j_outer * 32) + _jl_cr) * 32 + _kl_cr];
-        }
-      }
-      for (let j_inner = 0; j_inner < 32; j_inner++) {
+  for (let i = 0; i < 4; i++) {
+    for (let j_outer = 0; j_outer < 8; j_outer++) {
+      // unrolled loop j_inner (8 iterations)
+      { const j_inner = 0;
         acc = 0;
-        for (let k = 0; k < 32; k++) {
-          acc = (acc + (A[i * 32 + k] * W[((j_outer * 32) + j_inner) * 32 + k]));
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
         }
-        acc = (acc + B[0 * 64 + ((j_outer * 32) + j_inner)]);
-        Out[i * 64 + ((j_outer * 32) + j_inner)] = Math.max(acc, 0);
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+      }
+      { const j_inner = 1;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+      }
+      { const j_inner = 2;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+      }
+      { const j_inner = 3;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+      }
+      { const j_inner = 4;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+      }
+      { const j_inner = 5;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+      }
+      { const j_inner = 6;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
+      }
+      { const j_inner = 7;
+        acc = 0;
+        for (let k_outer = 0; k_outer < 8; k_outer++) {
+          for (let k_inner = 0; k_inner < 4; k_inner++) {
+            acc = (acc + (A[i * 32 + ((k_outer * 4) + k_inner)] * W[((j_outer * 8) + j_inner) * 32 + ((k_outer * 4) + k_inner)]));
+          }
+        }
+        acc = (acc + B[0 * 64 + ((j_outer * 8) + j_inner)]);
+        Out[i * 64 + ((j_outer * 8) + j_inner)] = Math.max(acc, 0);
       }
     }
   }
@@ -1132,14 +1604,14 @@ function fused_dense_bias_relu(A, W, B, Out) {
 
 function fused_dense_bias(A, W, B, Out) {
   // Buffer shapes:
-  // A: [1, 64] (global)
+  // A: [4, 64] (global)
   // W: [8, 64] (global)
   // B: [1, 8] (global)
-  // Out: [1, 8] (global)
+  // Out: [4, 8] (global)
   
   let acc = 0; // scalar (promoted from buffer)
   
-  for (let i = 0; i < 1; i++) {
+  for (let i = 0; i < 4; i++) {
     for (let j = 0; j < 8; j++) {
       acc = 0;
       for (let k = 0; k < 64; k++) {
@@ -1156,9 +1628,9 @@ function fused_dense_bias(A, W, B, Out) {
 function fused_dense_bias_relu_reg4(A, W, B, Out) {
   // Register-tiled: 4-way accumulator unrolling
   // Loads A[k] once, reuses for 4 output elements → 4× fewer A reads
-  for (let i = 0; i < 1; i++) {
+  for (let i = 0; i < 4; i++) {
     for (let j = 0; j < 64; j += 4) {
-      let acc0 = acc1 = acc2 = acc3 = 0;
+      let acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
       for (let k = 0; k < 32; k++) {
         const a = A[i * 32 + k]; // load once, reuse 4x
         acc0 += a * W[(j + 0) * 32 + k];
@@ -1181,9 +1653,9 @@ function fused_dense_bias_relu_reg4(A, W, B, Out) {
 function fused_dense_bias_reg4(A, W, B, Out) {
   // Register-tiled: 4-way accumulator unrolling
   // Loads A[k] once, reuses for 4 output elements → 4× fewer A reads
-  for (let i = 0; i < 1; i++) {
+  for (let i = 0; i < 4; i++) {
     for (let j = 0; j < 8; j += 4) {
-      let acc0 = acc1 = acc2 = acc3 = 0;
+      let acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
       for (let k = 0; k < 64; k++) {
         const a = A[i * 64 + k]; // load once, reuse 4x
         acc0 += a * W[(j + 0) * 64 + k];
@@ -1210,32 +1682,38 @@ function fused_dense_bias_reg4(A, W, B, Out) {
 
 ── Per-Kernel Memory Analysis ──
 Memory Analysis for fused_dense_bias_relu:
-  Total buffer size: 8.6 KB
-    A[1,32]: 128 B (input)
+  Total buffer size: 9.8 KB
+    A[4,32]: 512 B (input)
     W[64,32]: 8.0 KB (input)
     B[1,64]: 256 B (input)
-    Out[1,64]: 256 B (output)
-    acc[1]: 4 B (local)
+    Out[4,64]: 1.0 KB (output)
 
-  FLOP count: 4,224
-  Memory traffic: 33.5 KB (6,336 reads, 2,240 writes)
-  Arithmetic intensity: 0.12 FLOP/byte
-  Working set: 1.0 KB
+  FLOP count: 16,896
+  Memory traffic (naive):     66.0 KB (16,640 reads, 256 writes)
+  Memory traffic (effective):  42.0 KB  [after tiling(j,8), scalar_promotion]
+  Arithmetic intensity (naive):     0.25 FLOP/byte
+  Arithmetic intensity (effective): 0.39 FLOP/byte  ← cache-aware
+  Note: scalar_promotion eliminates Float32Array heap alloc → register variable.
+        Reduces per-call overhead; speedup exceeds what FLOP/byte AI predicts.
+  Working set: 1.2 KB
   Cache fitness: L1 ✓
   Bottleneck: 🧊 MEMORY-BOUND
 
 Memory Analysis for fused_dense_bias:
-  Total buffer size: 2.3 KB
-    A[1,64]: 256 B (input)
+  Total buffer size: 3.2 KB
+    A[4,64]: 1.0 KB (input)
     W[8,64]: 2.0 KB (input)
     B[1,8]: 32 B (input)
-    Out[1,8]: 32 B (output)
-    acc[1]: 4 B (local)
+    Out[4,8]: 128 B (output)
 
-  FLOP count: 1,032
-  Memory traffic: 8.2 KB (1,560 reads, 536 writes)
-  Arithmetic intensity: 0.12 FLOP/byte
-  Working set: 128 B
+  FLOP count: 4,128
+  Memory traffic (naive):     16.3 KB (4,128 reads, 32 writes)
+  Memory traffic (effective):  16.3 KB  [after scalar_promotion]
+  Arithmetic intensity (naive):     0.25 FLOP/byte
+  Arithmetic intensity (effective): 0.25 FLOP/byte  ← cache-aware
+  Note: scalar_promotion eliminates Float32Array heap alloc → register variable.
+        Reduces per-call overhead; speedup exceeds what FLOP/byte AI predicts.
+  Working set: 384 B
   Cache fitness: L1 ✓
   Bottleneck: 🧊 MEMORY-BOUND
 
@@ -1250,6 +1728,9 @@ Memory Analysis for fused_dense_bias:
   Peak bandwidth:  20 GB/s
   Ridge point:     0.50 FLOP/byte
 
+  ⚠  Timing: tuner-selected scheduled TIR (via compile()).
+     Main benchmark uses register-tiled path (compileRegTile) — see VERIFICATION.
+
   GFLOPS
   10.0 ┤─────────────── compute roof ─────────────────
     8.8 ┤ 
@@ -1257,47 +1738,52 @@ Memory Analysis for fused_dense_bias:
     6.3 ┤ 
     5.0 ┤    / (AI=0.25)
     3.8 ┤    / (AI=0.19)
-    2.5 ┤    / (AI=0.13)
-    1.3 ┤  ★ fused_dense_bias_relu    / (AI=0.06)
-    0.0 ┤  ★ fused_dense_bias    / (AI=0.00)
+    2.5 ┤  ★ fused_dense_bias  ★ fused_dense_bias_relu    / (AI=0.13)
+    1.3 ┤    / (AI=0.06)
+    0.0 ┤    / (AI=0.00)
         └────────────────────────────────────────────
          0.01  0.1   0.5   1.0   5.0   10.0
                  Arithmetic Intensity (FLOP/byte)
 
   ┌──────────────────────────┬──────────┬──────────┬──────────┬─────────────────────────────┐
-  │ Kernel                   │ Time(ms) │  GFLOPS  │ AI(F/B)  │ Efficiency                  │
+  │ Kernel                   │ Time(ms) │  GFLOPS  │ AI(F/B)* │ Efficiency                  │
   ├──────────────────────────┼──────────┼──────────┼──────────┼─────────────────────────────┤
-  │ fused_dense_bias_relu    │   0.0058 │    0.728 │     0.12 │ [██████░░░░░░░░░░░░░░] 29.6% │
-  │ fused_dense_bias         │   0.0025 │    0.413 │     0.12 │ [███░░░░░░░░░░░░░░░░░] 16.8% │
+  │ fused_dense_bias_relu    │   0.0066 │    2.560 │     0.25 │ [███████░░░░░░░░░░░░░] 32.6% │
+  │                          │          │          │ eff:0.39 │                             │
+  │ fused_dense_bias         │   0.0016 │    2.580 │     0.25 │ [██████████░░░░░░░░░░] 52.0% │
+  │                          │          │          │ eff:0.25 │                             │
   └──────────────────────────┴──────────┴──────────┴──────────┴─────────────────────────────┘
+  * AI(F/B) = intrinsic (naive) arithmetic intensity — algorithm-level, schedule-independent.
 
   🧊 Memory-bound kernels (2): fused_dense_bias_relu, fused_dense_bias
-     → Recommendation: increase tiling, add cache_read, layout transform
+     fused_dense_bias_relu: applied: [tiling(j,8), scalar_promotion]  → still consider: cache_read
+     fused_dense_bias: applied: [scalar_promotion]  → still consider: increase tiling
 
 ════════════════════════════════════════════════════════════
   VERIFICATION
 ════════════════════════════════════════════════════════════
 
 ── Compiled Forward Verification ──
-  NDArray naive result: [-0.27609580755233765, -0.22486355900764465, -0.4956604242324829, 0.08076675981283188, -0.03345191106200218...]
+  NDArray naive result: [-0.10566875338554382, -0.35852938890457153, 0.5069427490234375, 0.05677973851561546, 0.06335189193487167...]
   Compiled naive match: ✓
   Compiled scheduled match: ✓
 
 ── Benchmark ──
-  NDArray naive:       0.0148ms / inference
-  Compiled naive:      0.0172ms / inference
-    Speedup vs NDArray: 0.9x
-  Compiled scheduled:  0.0197ms / inference
-    Speedup vs NDArray: 0.8x
+  NDArray naive:       0.0283ms / inference
+  Compiled naive:      0.0096ms / inference
+    Speedup vs NDArray: 3.0x
+  Compiled scheduled:  0.0066ms / inference
+    Speedup vs NDArray: 4.3x
+    Speedup vs compiled naive: 1.45x
 
 ── Autograd Training Verification ──
   Training multilabel classifier for 5 steps...
-    Step 0: loss=0.735003 grads=✓
-    Step 1: loss=0.715198 grads=✓
-    Step 2: loss=0.697507 grads=✓
-    Step 3: loss=0.681673 grads=✓
-    Step 4: loss=0.668091 grads=✓
-  Loss changing: ✓ (0.7350 → 0.6681)
+    Step 0: loss=0.644132 grads=✓
+    Step 1: loss=0.343917 grads=✓
+    Step 2: loss=0.193099 grads=✓
+    Step 3: loss=0.114833 grads=✓
+    Step 4: loss=0.075896 grads=✓
+  Loss changing: ✓ (0.6441 → 0.0759)
 
 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 ▓  GRADIENT CHECK (Finite Difference Verification)

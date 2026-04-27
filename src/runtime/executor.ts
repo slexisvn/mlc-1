@@ -5,7 +5,7 @@
 
 import { NDArray } from '../tensor/ndarray.js';
 import { PrimFunc } from '../ir/low_level.js';
-import { compile } from '../codegen/js_codegen.js';
+import { compile, compileRegTile } from '../codegen/js_codegen.js';
 
 export interface MemoryPlan {
   buffers: Map<string, { offset: number; size: number; shape: number[] }>;
@@ -25,14 +25,14 @@ export class RuntimeModule {
   private primFuncs: PrimFunc[] = [];
   private params: Map<string, NDArray>;
 
-  constructor(primFuncs: PrimFunc[], params: Map<string, NDArray>) {
+  constructor(primFuncs: PrimFunc[], params: Map<string, NDArray>, useRegTile = false) {
     this.primFuncs = primFuncs;
     this.params = params;
 
     // Compile all PrimFuncs
     for (const pf of primFuncs) {
       try {
-        const fn = compile(pf);
+        const fn = useRegTile ? compileRegTile(pf) : compile(pf);
         this.functions.set(pf.name, fn);
       } catch (e) {
         console.error(`Failed to compile ${pf.name}:`, e);

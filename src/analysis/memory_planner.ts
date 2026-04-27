@@ -147,23 +147,168 @@ function analyzeMemoryTraffic(func: PrimFunc): { reads: Map<string, number>; wri
 //  Working Set Size (with tiling)
 // ═══════════════════════════════════════
 
-function estimateWorkingSet(func: PrimFunc): number {
-  // The working set is the amount of data accessed by the innermost
-  // tile of loops. For tiled loops, this is tile_i * tile_j * sizeof(float).
+function estimateWorkingSet(func: PrimFunc, schedInfo: ScheduleInfo): number {
+  // Working set = data that must be live in cache simultaneously at peak.
+  //
+  // IMPORTANT: getLoops() traverses ALL ForNodes including the packing stage
+  // loops injected by cacheRead (_jl_cr, _kl_cr). Multiplying all spatial
+  // extents together would therefore over-count by tileJ × K.  Instead, derive
+  // the working set from what is actually resident:
+  //
+  //  • cache_read applied  → W_local (explicit local alloc) + A row-slice + Out tile
+  //  • tiled (no W_local)  → W tile estimate + A row-slice + Out tile
+  //  • no tiling           → product of *non-packing* spatial loop extents
+
+  if (schedInfo.hasCacheRead && schedInfo.localBufBytes > 0) {
+    // W_local[tileJ, K] is exactly the tile in cache
+    const wParam = func.params.find(p => p.name === 'W');
+    const K = wParam?.shape[1] ?? 1;
+    const aSliceBytes = 1 * K * 4;          // one input row: A[i, 0..K)
+    const outTileBytes = schedInfo.tileJ * 4; // partial output tile
+    return schedInfo.localBufBytes + aSliceBytes + outTileBytes;
+  }
+
+  if (schedInfo.tiled) {
+    const wParam = func.params.find(p => p.name === 'W');
+    const K = wParam?.shape[1] ?? 1;
+    const wTileBytes  = schedInfo.tileJ * K * 4;
+    const aSliceBytes = K * 4;
+    const outTileBytes = schedInfo.tileJ * 4;
+    return wTileBytes + aSliceBytes + outTileBytes;
+  }
+
+  // No tiling: multiply only non-packing spatial loop extents.
+  // Packing helper loops are named with a leading '_' (e.g. _jl_cr, _kl_cr).
   const loops = func.getLoops();
   if (loops.length === 0) return 0;
-
-  // Find innermost spatial loop extents
   let workingElements = 1;
   for (const l of loops) {
-    if (l.loopVar.kind === 'spatial') {
+    if (l.loopVar.kind === 'spatial' && !l.loopVar.name.startsWith('_')) {
       workingElements *= l.forNode.extent;
     }
   }
+  return workingElements * 4 * Math.max(1, func.params.length - 1);
+}
 
-  // Each element is 4 bytes (float32)
-  // We need to account for all buffers accessed in inner loops
-  return workingElements * 4 * func.params.length;
+// ═══════════════════════════════════════
+//  Schedule Detection
+//  Inspect loop names and allocations to infer which schedule
+//  transforms have been applied, so AI can be computed correctly.
+// ═══════════════════════════════════════
+
+export interface ScheduleInfo {
+  /** j has been split into j_outer × j_inner */
+  tiled: boolean;
+  /** tile size for j (the j_inner extent) */
+  tileJ: number;
+  /** a W_local or *_local buffer exists → cache_read applied */
+  hasCacheRead: boolean;
+  /** local buffer size in bytes */
+  localBufBytes: number;
+  /** W reuse factor due to tiling: the k-loop extent (each W row reused k times) */
+  wReuseK: number;
+  /** scalar promotion was applied (acc Float32Array[1] → let acc = 0) */
+  hasScalarPromotion: boolean;
+  /** j extent of the original function (used to suppress irrelevant hints) */
+  jExtent: number;
+  /** applied optimisation labels, used for recommendation text */
+  applied: string[];
+}
+
+function detectScheduleInfo(func: PrimFunc): ScheduleInfo {
+  const loops = func.getLoops();
+  const loopNames = loops.map(l => l.loopVar.name);
+
+  const tiled = loopNames.includes('j_outer') && loopNames.includes('j_inner');
+  let tileJ = 1;
+  if (tiled) {
+    const jInnerLoop = loops.find(l => l.loopVar.name === 'j_inner');
+    if (jInnerLoop) tileJ = jInnerLoop.forNode.extent;
+  }
+
+  // j extent: use j_outer*tileJ when tiled, otherwise direct j loop extent
+  const jLoop = loops.find(l => l.loopVar.name === 'j');
+  const jOuterLoop = loops.find(l => l.loopVar.name === 'j_outer');
+  const jExtent = jLoop ? jLoop.forNode.extent
+    : (jOuterLoop && tiled ? jOuterLoop.forNode.extent * tileJ : 1);
+
+  // Detect cache_read: a local alloc whose name ends with '_local'
+  const localAllocs = func.allocations.filter(a => a.name.endsWith('_local'));
+  const hasCacheRead = localAllocs.length > 0;
+  const localBufBytes = localAllocs.reduce(
+    (sum, a) => sum + a.shape.reduce((s, d) => s * d, 1) * 4, 0
+  );
+
+  // k-loop reuse factor: how many times each loaded W element is reused.
+  // For dense matmul: each W[j,k] is multiplied once per k iteration,
+  // and the tile is loaded once for tileJ output elements → reuse = tileJ.
+  // Without tiling each element is only loaded once per output row → reuse = 1.
+  const wReuseK = tiled ? tileJ : 1;
+
+  // Detect scalar promotion: storageRewrite removes acc from func.allocations
+  // and rewrites BufferStore(acc)/BufferLoad(acc) → ScalarStoreNode/ScalarLoadExpr.
+  // The signal is a ScalarStoreNode (or ScalarDeclNode) anywhere in the body.
+  function hasScalarNode(stmt: Stmt): boolean {
+    if ((stmt as any).nodeType === 'scalar_decl') return true;
+    if ((stmt as any).nodeType === 'scalar_store') return true;
+    if (stmt instanceof ForNode) return hasScalarNode(stmt.body);
+    if (stmt instanceof SeqNode) return stmt.stmts.some(hasScalarNode);
+    if (stmt instanceof AllocNode) return hasScalarNode(stmt.body);
+    return false;
+  }
+  const hasScalarPromotion = hasScalarNode(func.body);
+
+  const applied: string[] = [];
+  if (tiled) applied.push(`tiling(j,${tileJ})`);
+  if (hasCacheRead) applied.push('cache_read');
+  if (hasScalarPromotion) applied.push('scalar_promotion');
+
+  return { tiled, tileJ, hasCacheRead, localBufBytes, wReuseK, hasScalarPromotion, jExtent, applied };
+}
+
+// ─── Effective memory traffic accounting for cache reuse ───
+// The naive traffic counter treats every array access as a DRAM round-trip.
+// With tiling: within each j_outer tile, the W tile (tileJ × K floats) is
+// loaded once and reused for tileJ output elements, so the effective W reads
+// per tile are K (not tileJ × K). This raises AI by a factor of tileJ.
+function effectiveTrafficBytes(
+  rawReads: Map<string, number>,
+  rawWrites: Map<string, number>,
+  schedInfo: ScheduleInfo,
+  func: PrimFunc,
+): number {
+  let totalEffectiveBytes = 0;
+
+  for (const [name, count] of rawReads) {
+    const param = func.params.find(p => p.name === name);
+    const isLocalBuf = name.endsWith('_local');
+
+    // Local buffers (acc, W_local) live in registers/L1 — not DRAM traffic
+    if (isLocalBuf) continue;
+    if (param?.scope === 'local') continue;
+
+    // W buffer: with tiling, effective reads = totalW_elements (each loaded once per tile)
+    // rather than tileJ × totalW_elements (once per output element)
+    if (name === 'W' && schedInfo.tiled && schedInfo.wReuseK > 1) {
+      const wParam = func.params.find(p => p.name === 'W');
+      if (wParam) {
+        // Effective: W is loaded exactly once (one DRAM pass), reused inside tile
+        const wElements = wParam.shape.reduce((a, b) => a * b, 1);
+        totalEffectiveBytes += wElements * 4;
+        continue;
+      }
+    }
+
+    totalEffectiveBytes += count * 4;
+  }
+
+  for (const [name, count] of rawWrites) {
+    const isLocalBuf = name.endsWith('_local');
+    if (isLocalBuf) continue;
+    totalEffectiveBytes += count * 4;
+  }
+
+  return totalEffectiveBytes;
 }
 
 // ═══════════════════════════════════════
@@ -184,7 +329,9 @@ export interface MemoryPlan {
   totalBytes: number;
   flopCount: number;
   memoryTraffic: { totalReads: number; totalWrites: number; totalBytes: number };
-  arithmeticIntensity: number;  // FLOP / byte
+  effectiveTrafficBytes: number;
+  arithmeticIntensity: number;  // FLOP / byte (raw, naive)
+  effectiveAI: number;          // FLOP / byte (cache-aware, after tiling / cache_read)
   workingSetBytes: number;
   cacheFitness: {
     fitsL1: boolean;
@@ -192,6 +339,7 @@ export interface MemoryPlan {
     fitsL3: boolean;
   };
   boundedness: 'compute-bound' | 'memory-bound';
+  scheduleInfo: ScheduleInfo;
 }
 
 export function analyzeMemory(func: PrimFunc): MemoryPlan {
@@ -233,13 +381,20 @@ export function analyzeMemory(func: PrimFunc): MemoryPlan {
   for (const [, count] of writes) totalWrites += count;
   const totalTrafficBytes = (totalReads + totalWrites) * 4;
 
+  // ─── Schedule detection & cache-aware effective traffic ───
+  const scheduleInfo = detectScheduleInfo(func);
+  const effTrafficBytes = effectiveTrafficBytes(reads, writes, scheduleInfo, func);
+
   // ─── Arithmetic intensity ───
   const arithmeticIntensity = totalTrafficBytes > 0
     ? flopCount / totalTrafficBytes
     : 0;
+  const effectiveAI = effTrafficBytes > 0
+    ? flopCount / effTrafficBytes
+    : arithmeticIntensity;
 
   // ─── Working set ───
-  const workingSetBytes = estimateWorkingSet(func);
+  const workingSetBytes = estimateWorkingSet(func, scheduleInfo);
 
   // ─── Cache fitness ───
   const cacheFitness = {
@@ -248,13 +403,10 @@ export function analyzeMemory(func: PrimFunc): MemoryPlan {
     fitsL3: workingSetBytes <= CACHE_SIZES.L3,
   };
 
-  // ─── Boundedness ───
-  // Ridge point: where compute roof meets memory roof
-  // For typical CPUs: ~10 GFLOPS peak, ~20 GB/s bandwidth
-  // Ridge point = 10 / 20 = 0.5 FLOP/byte
+  // ─── Boundedness — use effectiveAI for accuracy ───
   const ridgePoint = 0.5;
   const boundedness: 'compute-bound' | 'memory-bound' =
-    arithmeticIntensity >= ridgePoint ? 'compute-bound' : 'memory-bound';
+    effectiveAI >= ridgePoint ? 'compute-bound' : 'memory-bound';
 
   return {
     funcName: func.name,
@@ -262,10 +414,13 @@ export function analyzeMemory(func: PrimFunc): MemoryPlan {
     totalBytes,
     flopCount,
     memoryTraffic: { totalReads, totalWrites, totalBytes: totalTrafficBytes },
+    effectiveTrafficBytes: effTrafficBytes,
     arithmeticIntensity,
+    effectiveAI,
     workingSetBytes,
     cacheFitness,
     boundedness,
+    scheduleInfo,
   };
 }
 
@@ -285,8 +440,18 @@ export function printMemoryPlan(plan: MemoryPlan): string {
 
   lines.push('');
   lines.push(`  FLOP count: ${plan.flopCount.toLocaleString()}`);
-  lines.push(`  Memory traffic: ${formatBytes(plan.memoryTraffic.totalBytes)} (${plan.memoryTraffic.totalReads.toLocaleString()} reads, ${plan.memoryTraffic.totalWrites.toLocaleString()} writes)`);
-  lines.push(`  Arithmetic intensity: ${plan.arithmeticIntensity.toFixed(2)} FLOP/byte`);
+  lines.push(`  Memory traffic (naive):     ${formatBytes(plan.memoryTraffic.totalBytes)} (${plan.memoryTraffic.totalReads.toLocaleString()} reads, ${plan.memoryTraffic.totalWrites.toLocaleString()} writes)`);
+  if (plan.scheduleInfo.applied.length > 0) {
+    lines.push(`  Memory traffic (effective):  ${formatBytes(plan.effectiveTrafficBytes)}  [after ${plan.scheduleInfo.applied.join(', ')}]`);
+    lines.push(`  Arithmetic intensity (naive):     ${plan.arithmeticIntensity.toFixed(2)} FLOP/byte`);
+    lines.push(`  Arithmetic intensity (effective): ${plan.effectiveAI.toFixed(2)} FLOP/byte  ← cache-aware`);
+    if (plan.scheduleInfo.hasScalarPromotion) {
+      lines.push(`  Note: scalar_promotion eliminates Float32Array heap alloc → register variable.`);
+      lines.push(`        Reduces per-call overhead; speedup exceeds what FLOP/byte AI predicts.`);
+    }
+  } else {
+    lines.push(`  Arithmetic intensity: ${plan.arithmeticIntensity.toFixed(2)} FLOP/byte`);
+  }
   lines.push(`  Working set: ${formatBytes(plan.workingSetBytes)}`);
 
   const cacheStr = plan.cacheFitness.fitsL1 ? 'L1 ✓' :

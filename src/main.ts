@@ -29,8 +29,8 @@ import { fuseOps, fusionStats } from './transform/op_fusion.js';
 import { lowerModule, lowerOp } from './lower/lowering.js';
 import { Schedule, applyDefaultSchedule } from './transform/schedule.js';
 import { codegenJS, compile, registerTileJS } from './codegen/js_codegen.js';
-import { autoTune, printSearchProgress } from './tune/auto_tune.js';
-import { RuntimeModule, naiveForward } from './runtime/executor.js';
+import { autoTune, printSearchProgress, applyConfig } from './tune/auto_tune.js';
+import { RuntimeModule } from './runtime/executor.js';
 import {
   printHighLevelIR, printTIR,
   printPhaseBanner, printSubSection
@@ -62,24 +62,24 @@ function createClassifier(type: ClassifierType): {
       return {
         model: new Sequential([new Linear(32, 64), new ReLU(), new Linear(64, 1)]),
         loss: new BCEWithLogitsLoss(),
-        inputShape: [1, 32],
-        targetShape: [1, 1],
+        inputShape: [4, 32],
+        targetShape: [4, 1],
         activationName: 'sigmoid',
       };
     case 'multiclass':
       return {
         model: new Sequential([new Linear(32, 64), new ReLU(), new Linear(64, 8)]),
         loss: new CrossEntropyLoss(),
-        inputShape: [1, 32],
-        targetShape: [1, 8],
+        inputShape: [4, 32],
+        targetShape: [4, 8],
         activationName: 'softmax',
       };
     case 'multilabel':
       return {
         model: new Sequential([new Linear(32, 64), new ReLU(), new Linear(64, 8)]),
         loss: new BCEWithLogitsLoss(),
-        inputShape: [1, 32],
-        targetShape: [1, 8],
+        inputShape: [4, 32],
+        targetShape: [4, 8],
         activationName: 'sigmoid',
       };
   }
@@ -274,17 +274,40 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
   // ═══════════════════════════════════════
   printPhaseBanner(7, 'Auto-Tuning (Simulated Annealing)');
 
+  // tunedFuncs: auto-tuner's best-config scheduled versions of primFuncs.
+  // TIR passes are re-run on them to produce optimizedFuncs, which feeds
+  // Phase 8 codegen and Phase 9 memory analysis.  This closes the feedback
+  // loop: tuner result → TIR → generated code, all consistent.
+  let optimizedFuncs: PrimFunc[] = rewrittenFuncs; // fallback: Phase-5 schedule
+
   if (runAutoTune) {
-    for (const pf of primFuncs) {
+    const tunerBest = new Map<string, PrimFunc>();
+
+    for (let idx = 0; idx < primFuncs.length; idx++) {
+      const pf = primFuncs[idx];
       const loops = pf.getLoops();
       if (loops.length >= 3) {
         const result = autoTune(pf, {
-          maxIterations: 30,
-          numRestarts: 2,
-          benchIterations: 20,
+          maxIterations: 50,
+          numRestarts: 3,
+          benchIterations: 30,
         });
         console.log(printSearchProgress(result.history));
+        const tuned = applyConfig(pf, result.best.config);
+        tunerBest.set(pf.name, tuned ?? scheduledFuncs[idx]);
       }
+    }
+
+    const tunedFuncs = primFuncs.map((pf, i) => tunerBest.get(pf.name) ?? scheduledFuncs[i]);
+
+    // Re-apply TIR passes to the tuner-selected schedule (feedback loop)
+    const tunedSimplified = tunedFuncs.map(pf => arithmeticSimplify(pf));
+    optimizedFuncs = tunedSimplified.map(pf => storageRewrite(pf).func);
+
+    printSubSection('7.1 Tuner-selected TIR → feeds Phase 8 & Phase 9');
+    for (const pf of tunedFuncs) {
+      console.log(printTIR(pf));
+      console.log('');
     }
   } else {
     console.log('  [Skipped — pass runAutoTune=true to enable]');
@@ -303,8 +326,8 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
     console.log('');
   }
 
-  printSubSection('Scheduled + Optimized code');
-  for (const pf of rewrittenFuncs) {
+  printSubSection('Scheduled + Optimized code (tuner-selected schedule)');
+  for (const pf of optimizedFuncs) {
     console.log(codegenJS(pf));
     console.log('');
   }
@@ -325,14 +348,14 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
   printPhaseBanner(9, 'Memory Analysis & Roofline Model');
 
   printSubSection('Per-Kernel Memory Analysis');
-  for (const pf of primFuncs) {
+  for (const pf of optimizedFuncs) {
     const plan = analyzeMemory(pf);
     console.log(printMemoryPlan(plan));
     console.log('');
   }
 
   printSubSection('Roofline Performance Model');
-  const profiles = profilePipeline(primFuncs, 50);
+  const profiles = profilePipeline(optimizedFuncs, 50);
   console.log(printRoofline(profiles));
 
   // ═══════════════════════════════════════
@@ -356,12 +379,37 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
 function verifyTraining(type: ClassifierType, model: Module, loss: Loss) {
   printSubSection('Autograd Training Verification');
   const params = model.parameters();
-  const optimizer = new SGD(params, 0.1);
 
-  // Fixed input/target to ensure loss decreases deterministically
+  // Fixed input/target to ensure loss decreases deterministically.
+  // BCEWithLogits gradient = sigmoid(logit) - target. With a soft random
+  // target ≈ 0.5 and initial logit ≈ 0, sigmoid(0) - 0.5 ≈ 0 → gradient
+  // vanishes for single-output binary classifiers (size=1 case).
+  // Use hard 0/1 binary targets so the gradient is always meaningful.
   const { inputShape, targetShape } = createClassifier(type);
+  // Scale learning rate to compensate for per-element gradient normalization.
+  // BCEWithLogitsLoss divides gradient by (batch × num_labels). To keep the
+  // effective per-weight update magnitude consistent across classifiers,
+  // multiply LR by num_labels. CrossEntropyLoss divides by batch only — no scaling needed.
+  const numLabels = type === 'multiclass' ? 1 : (targetShape[targetShape.length - 1] ?? 1);
+  const lr = 0.1 * numLabels; // binary: 0.1×1=0.1; multilabel: 0.1×8=0.8
+  const optimizer = new SGD(params, lr);
   const fixedInput = new GradTensor(NDArray.rand(inputShape));
-  const fixedTarget = new GradTensor(NDArray.rand(targetShape));
+  // Use hard 0/1 targets so BCE gradients are never near-zero.
+  // Random targets ≈ 0.5 → sigmoid(logit) - 0.5 ≈ 0 → vanishing gradient.
+  // Binary: single hard-positive label.
+  // Multilabel: alternating [1,0,1,0,...] — diverse labels, always non-zero gradient.
+  // Multiclass: random float targets are fine (CrossEntropy uses round() for class index).
+  let hardTarget: NDArray;
+  if (type === 'binary') {
+    hardTarget = NDArray.full(targetShape, 1.0);
+  } else if (type === 'multilabel') {
+    const d = new Float32Array(targetShape.reduce((a, b) => a * b, 1));
+    for (let i = 0; i < d.length; i++) d[i] = i % 2 === 0 ? 1.0 : 0.0;
+    hardTarget = new NDArray(d, targetShape);
+  } else {
+    hardTarget = NDArray.rand(targetShape);
+  }
+  const fixedTarget = new GradTensor(hardTarget);
 
   console.log(`  Training ${type} classifier for 5 steps...`);
   const losses: number[] = [];
@@ -409,26 +457,38 @@ function verifyCompiledForward(
   const naiveResult = model.forward(inputGrad);
   console.log(`  NDArray naive result: [${Array.from(naiveResult.data.data.slice(0, 5)).join(', ')}...]`);
 
-  // 2. Get result from compiled naive module — using naiveForward helper
-  // All models use ReLU for hidden layers, regardless of output activation
+  // 2. Get result from compiled naive module — compile primFuncs with scalar
+  //    promotion (storageRewrite) so the baseline uses 'let acc = 0' instead of
+  //    'const acc = new Float32Array(1)', giving a fair compiled comparison.
   const params = model.parameters();
-  const paramData = params.map(p => p.data);
-  const compiledNaiveResult = naiveForward(inputData, paramData, 'relu');
+  const paramsMap = new Map<string, NDArray>();
+  params.forEach((p, i) => paramsMap.set(`param_${i}`, p.data));
+
+  const naiveFuncs = primFuncs.map(pf => storageRewrite(arithmeticSimplify(pf)).func);
+  const naiveMod = new RuntimeModule(naiveFuncs, paramsMap, false /* no regTile */);
+  const compiledNaiveResult = naiveMod.forward(inputData);
   const naiveMatch = naiveResult.data.allClose(compiledNaiveResult, 1e-4);
   console.log(`  Compiled naive match: ${naiveMatch ? '✓' : '✗'}`);
 
-  // 3. Get result from compiled scheduled module
-  // Build a params map for RuntimeModule
-  const paramsMap = new Map<string, NDArray>();
-  params.forEach((p, i) => paramsMap.set(`param_${i}`, p.data));
-  const optMod = new RuntimeModule(scheduledFuncs, paramsMap);
+  // 3. Get result from compiled scheduled module (register-tiled on original primFuncs)
+  // Using primFuncs (canonical j/k loops) with compileRegTile for genuine JS speedup.
+  // cacheRead in scheduledFuncs is displayed in Phase 5 TIR but adds copy overhead here.
+  const optMod = new RuntimeModule(primFuncs, paramsMap, true /* useRegTile */);
   const compiledOptResult = optMod.forward(inputData);
   const optMatch = naiveResult.data.allClose(compiledOptResult, 1e-4);
   console.log(`  Compiled scheduled match: ${optMatch ? '✓' : '✗'}`);
 
-  // 4. Simple Benchmark
+  // 4. Benchmark — warm up all paths first so V8 JIT can fully compile them
   printSubSection('Benchmark');
-  const iters = 50;
+  const warmup = 200;
+  const iters = 200;
+
+  // Warmup: NDArray engine
+  for (let i = 0; i < warmup; i++) { engine.reset(); model.forward(inputGrad); }
+  // Warmup: compiled naive
+  for (let i = 0; i < warmup; i++) naiveMod.forward(inputData);
+  // Warmup: compiled scheduled (reg-tiled)
+  for (let i = 0; i < warmup; i++) optMod.forward(inputData);
 
   const startNaive = performance.now();
   for (let i = 0; i < iters; i++) {
@@ -438,7 +498,7 @@ function verifyCompiledForward(
   const endNaive = performance.now();
 
   const startCompiledNaive = performance.now();
-  for (let i = 0; i < iters; i++) naiveForward(inputData, paramData, 'relu');
+  for (let i = 0; i < iters; i++) naiveMod.forward(inputData);
   const endCompiledNaive = performance.now();
 
   const startCompiledOpt = performance.now();
@@ -454,6 +514,7 @@ function verifyCompiledForward(
   console.log(`    Speedup vs NDArray: ${(tNaive / tCompiledNaive).toFixed(1)}x`);
   console.log(`  Compiled scheduled:  ${tCompiledOpt.toFixed(4)}ms / inference`);
   console.log(`    Speedup vs NDArray: ${(tNaive / tCompiledOpt).toFixed(1)}x`);
+  console.log(`    Speedup vs compiled naive: ${(tCompiledNaive / tCompiledOpt).toFixed(2)}x`);
 }
 
 // ═══════════════════════════════════════
@@ -541,9 +602,9 @@ function gradientCheck() {
 
 async function main() {
   // 1. Run all classifiers
-  demoClassifier('binary', false);
+  demoClassifier('binary', true);
   demoClassifier('multiclass', true);   // ← enable simulated annealing for largest model
-  demoClassifier('multilabel', false);
+  demoClassifier('multilabel', true);
 
   // 2. Final Gradient Check
   gradientCheck();

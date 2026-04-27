@@ -251,6 +251,26 @@ export function compile(func: PrimFunc): Function {
 //    - Reduces loop overhead 4× and enables instruction-level parallelism
 // ═══════════════════════════════════════
 
+/**
+ * Compile a register-tiled version of func directly to a callable Function.
+ * Falls back to standard compile() when tiling is not applicable
+ * (e.g., j loop absent or j % tileSize !== 0).
+ * Requires the PrimFunc to have canonical loop names 'j' and 'k'.
+ */
+export function compileRegTile(func: PrimFunc, tileSize = 4): Function {
+  const loops = func.getLoops();
+  const jLoop = loops.find(l => l.loopVar.name === 'j');
+  const kLoop = loops.find(l => l.loopVar.name === 'k');
+  if (!jLoop || !kLoop || jLoop.forNode.extent % tileSize !== 0) {
+    return compile(func);
+  }
+  const code = registerTileJS(func, tileSize);
+  const regFuncName = `${func.name}_reg${tileSize}`;
+  // Define the inner function then return it
+  // eslint-disable-next-line no-new-func
+  return new Function(code + '\nreturn ' + regFuncName + ';')();
+}
+
 export function registerTileJS(func: PrimFunc, tileSize = 4): string {
   // Find the spatial j loop (output features) and reduction k loop
   const loops = func.getLoops();
@@ -261,11 +281,11 @@ export function registerTileJS(func: PrimFunc, tileSize = 4): string {
     return `// register tiling not applicable to ${func.name}\n` + codegenJS(func);
   }
 
-  const M = 1; // batch size
+  const aBuf = func.params.find(p => p.name === 'A');
+  const wBuf = func.params.find(p => p.name === 'W');
+  const M = aBuf ? aBuf.shape[0] : 1; // batch size from A buffer
   const N = jLoop.forNode.extent;
   const K = kLoop.forNode.extent;
-  const wBuf = func.params.find(p => p.name === 'W');
-  const aBuf = func.params.find(p => p.name === 'A');
   const bBuf = func.params.find(p => p.name === 'B');
   const outBuf = func.params.find(p => p.name === 'Out');
 
@@ -282,7 +302,10 @@ export function registerTileJS(func: PrimFunc, tileSize = 4): string {
   lines.push(`  // Loads A[k] once, reuses for ${tileSize} output elements → ${tileSize}× fewer A reads`);
   lines.push(`  for (let i = 0; i < ${M}; i++) {`);
   lines.push(`    for (let j = 0; j < ${N}; j += ${tileSize}) {`);
-  lines.push(`      let ${accNames.join(' = ')} = 0;`);
+  // Declare each accumulator separately so all are proper block-scoped locals.
+  // "let acc0 = acc1 = acc2 = acc3 = 0" only declares acc0; acc1..accN become
+  // implicit globals — slow and prevents JIT register-allocation.
+  lines.push(`      let ${accNames.map(n => `${n} = 0`).join(', ')};`);
   lines.push(`      for (let k = 0; k < ${K}; k++) {`);
   lines.push(`        const a = A[i * ${K} + k]; // load once, reuse ${tileSize}x`);
   for (let t = 0; t < tileSize; t++) {

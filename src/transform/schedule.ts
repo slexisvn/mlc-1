@@ -195,8 +195,10 @@ export class Schedule {
     const K = wBuf.shape[1];
     const wLocal = new BufferDecl(`${bufName}_local`, [tileSize, K], 'local');
 
-    // Helper: inner loop var name is outerVar_name + '_inner'
-    const innerVarName = `${atLoopVar.name}_inner`;
+    // The inner loop is named by stripping '_outer' from atLoopVar.name and
+    // appending '_inner'.  e.g. 'j_outer' → 'j_inner'.
+    // (NOT 'j_outer_inner' — that would never match the split's actual name.)
+    const innerVarName = atLoopVar.name.replace(/_outer$/, '_inner');
 
     // ─── Build packing stage (inside atLoopVar) ───
     const jlVar = new LoopVar('_jl_cr', 'spatial');

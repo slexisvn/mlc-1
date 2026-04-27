@@ -52,8 +52,9 @@ function benchmarkKernel(func: PrimFunc, iterations: number): number {
   // Compile
   const fn = compile(func);
 
-  // Warmup
-  for (let i = 0; i < 10; i++) fn(...buffers);
+  // Warmup — enough iterations so V8 JIT fully compiles the hot loop
+  // before we take measurements (10 is insufficient for small kernels).
+  for (let i = 0; i < 100; i++) fn(...buffers);
 
   // Measure
   const times: number[] = [];
@@ -110,11 +111,18 @@ export function profileKernel(
     : 0;
 
   const achievedBW = medianSeconds > 0
-    ? memPlan.memoryTraffic.totalBytes / medianSeconds / 1e9
+    ? memPlan.effectiveTrafficBytes / medianSeconds / 1e9
     : 0;
 
+  // Use cache-aware effectiveAI for roofline classification and efficiency %
+  // (it reflects actual data reuse from tiling), but store the intrinsic
+  // arithmeticIntensity in the profile so the table AI column is stable
+  // across classifiers regardless of which tile the tuner happened to pick.
+  const effectiveAI = memPlan.effectiveAI;
+  const intrinsicAI = memPlan.arithmeticIntensity;
+
   // Theoretical max for this kernel's arithmetic intensity
-  const memoryRoof = hw.peakBandwidthGBs * memPlan.arithmeticIntensity;
+  const memoryRoof = hw.peakBandwidthGBs * effectiveAI;
   const computeRoof = hw.peakGFLOPS;
   const theoreticalPeak = Math.min(memoryRoof, computeRoof);
   const percentOfPeak = theoreticalPeak > 0
@@ -122,13 +130,13 @@ export function profileKernel(
     : 0;
 
   const bottleneck: 'compute' | 'memory' =
-    memPlan.arithmeticIntensity >= hw.ridgePoint ? 'compute' : 'memory';
+    effectiveAI >= hw.ridgePoint ? 'compute' : 'memory';
 
   return {
     name: func.name,
     medianTimeMs: medianMs,
     achievedGFLOPS,
-    arithmeticIntensity: memPlan.arithmeticIntensity,
+    arithmeticIntensity: intrinsicAI,   // intrinsic (naive) — stable across schedules
     achievedBandwidthGBs: achievedBW,
     percentOfPeak: Math.min(percentOfPeak, 100),
     bottleneck,
@@ -167,6 +175,9 @@ export function printRoofline(
   lines.push(`  Peak compute:    ${hw.peakGFLOPS} GFLOPS`);
   lines.push(`  Peak bandwidth:  ${hw.peakBandwidthGBs} GB/s`);
   lines.push(`  Ridge point:     ${hw.ridgePoint.toFixed(2)} FLOP/byte`);
+  lines.push('');
+  lines.push('  ⚠  Timing: tuner-selected scheduled TIR (via compile()).');
+  lines.push('     Main benchmark uses register-tiled path (compileRegTile) — see VERIFICATION.');
   lines.push('');
 
   // ─── Roofline plot (ASCII art) ───
@@ -211,7 +222,7 @@ export function printRoofline(
 
   // ─── Per-kernel table ───
   lines.push('  ┌──────────────────────────┬──────────┬──────────┬──────────┬─────────────────────────────┐');
-  lines.push('  │ Kernel                   │ Time(ms) │  GFLOPS  │ AI(F/B)  │ Efficiency                  │');
+  lines.push('  │ Kernel                   │ Time(ms) │  GFLOPS  │ AI(F/B)* │ Efficiency                  │');
   lines.push('  ├──────────────────────────┼──────────┼──────────┼──────────┼─────────────────────────────┤');
 
   for (const p of profiles) {
@@ -219,10 +230,13 @@ export function printRoofline(
     const time = p.medianTimeMs.toFixed(4).padStart(8);
     const gflops = p.achievedGFLOPS.toFixed(3).padStart(8);
     const ai = p.arithmeticIntensity.toFixed(2).padStart(8);
+    const effAI = p.memoryPlan.effectiveAI.toFixed(2);
     lines.push(`  │ ${name} │ ${time} │ ${gflops} │ ${ai} │ ${p.rooflineBar} │`);
+    lines.push(`  │ ${''.padEnd(24)} │          │          │ eff:${effAI.padStart(4)} │                             │`);
   }
 
   lines.push('  └──────────────────────────┴──────────┴──────────┴──────────┴─────────────────────────────┘');
+  lines.push('  * AI(F/B) = intrinsic (naive) arithmetic intensity — algorithm-level, schedule-independent.');
   lines.push('');
 
   // ─── Bottleneck summary ───
@@ -231,7 +245,22 @@ export function printRoofline(
 
   if (memBound.length > 0) {
     lines.push(`  🧊 Memory-bound kernels (${memBound.length}): ${memBound.map(p => p.name).join(', ')}`);
-    lines.push('     → Recommendation: increase tiling, add cache_read, layout transform');
+    // Show which optimizations are already applied vs still suggested
+    for (const p of memBound) {
+      const sched = p.memoryPlan.scheduleInfo;
+      const done = sched.applied.length > 0 ? `applied: [${sched.applied.join(', ')}]` : '';
+      const remaining: string[] = [];
+      if (!sched.tiled) remaining.push('increase tiling');
+      // Suppress cache_read hint when: (a) kernel has only one output column,
+      // or (b) tileJ=1 meaning j-tiling is trivial — cache_read needs tileJ>1.
+      if (!sched.hasCacheRead && sched.jExtent > 1 && sched.tileJ > 1) remaining.push('cache_read');
+      if (remaining.length > 0) {
+        const hint = done ? `${done}  → still consider: ${remaining.join(', ')}` : `→ consider: ${remaining.join(', ')}`;
+        lines.push(`     ${p.name}: ${hint}`);
+      } else {
+        lines.push(`     ${p.name}: ${done}  → model too small to reach ridge point (normal for tiny NN inference)`);
+      }
+    }
   }
   if (compBound.length > 0) {
     lines.push(`  🔥 Compute-bound kernels (${compBound.length}): ${compBound.map(p => p.name).join(', ')}`);
