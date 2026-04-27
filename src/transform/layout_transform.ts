@@ -26,6 +26,7 @@ import {
   LoopVar, VarIndex, ConstIndex, BinOpIndex,
   type Stmt, type ValueExpr, type IndexExpr
 } from '../ir/low_level.js';
+import { ScalarStoreNode } from './storage_rewrite.js';
 
 // ─── Stats ───
 
@@ -123,6 +124,13 @@ function rewriteStmtWToPacked(
     return new BufferStoreNode(stmt.buffer, stmt.indices,
       rewriteValueWToPacked(stmt.value, wBufName, wPacked, bn)
     );
+  }
+  if ((stmt as any) instanceof ScalarStoreNode) {
+    const s = stmt as unknown as ScalarStoreNode;
+    return new (ScalarStoreNode as any)(
+      s.scalarName,
+      rewriteValueWToPacked(s.value, wBufName, wPacked, bn)
+    ) as unknown as Stmt;
   }
   if (stmt instanceof AllocNode) {
     return new AllocNode(stmt.buffer,

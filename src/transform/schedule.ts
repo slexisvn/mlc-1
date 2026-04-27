@@ -8,7 +8,7 @@
 import {
   PrimFunc, ForNode, SeqNode, BufferStoreNode, AllocNode,
   LoopVar, LoopAnnotation,
-  BufferDecl, BufferLoadExpr, BinOpExpr, MaxExpr, MinExpr, CallExprTIR,
+  BufferDecl, BufferLoadExpr, BinOpExpr, MaxExpr, MinExpr, CallExprTIR, ConstExpr,
   VarIndex, ConstIndex, BinOpIndex,
   VarRefExpr,
   type Stmt, type IndexExpr, type ValueExpr,
@@ -235,18 +235,223 @@ export class Schedule {
     return wLocal;
   }
 
-  // ─── RFACTOR (simplified) ───
-  // Splits a reduction loop into (k_outer [parallel], k_inner),
-  // enabling parallel execution of the reduction.
-  // Note: this is a simplified version — full rfactor also creates
-  // partial sum buffers and a final merge loop.
+  // ─── RFACTOR ───
+  // Parallel reduction decomposition:
+  //
+  //   BEFORE (serial reduction):
+  //     for i: for j:
+  //       acc = 0
+  //       for k: acc += A[i,k] * W[j,k]
+  //       Out[i,j] = acc
+  //
+  //   AFTER rfactor(k, numParts=4):
+  //     alloc acc_rf[k_outer_extent]   ← partial sum buffers
+  //     for i: for j:
+  //       for k_outer in parallel:     ← each part runs independently
+  //         acc_rf[k_outer] = 0
+  //         for k_inner:
+  //           acc_rf[k_outer] += A[i, k_outer*kPart+k_inner] * W[j, k_outer*kPart+k_inner]
+  //       acc = 0                      ← merge loop: sum the partial sums
+  //       for k_outer:
+  //         acc += acc_rf[k_outer]
+  //       Out[i,j] = acc
+  //
+  // This teaches: parallel reduction via partial-sum factoring — the
+  // technique behind fast multi-core and GPU reduction kernels.
   rfactor(reductionLoopVar: LoopVar, numParts: number): [LoopVar, LoopVar] {
     const kFor = this.loopMap.get(reductionLoopVar.name);
     if (!kFor) throw new Error(`Loop '${reductionLoopVar.name}' not found`);
-    const kPart = Math.ceil(kFor.extent / numParts);
+
+    const kExtent = kFor.extent;
+    const kPart = Math.ceil(kExtent / numParts);
+    const kOuterExtent = Math.ceil(kExtent / kPart);
+
+    // Step 1: split k → k_outer, k_inner via existing split()
     const [kOuter, kInner] = this.split(reductionLoopVar, kPart);
+
+    // Step 2: create partial-sum buffer acc_rf[kOuterExtent]
+    const accRf = new BufferDecl(`acc_rf`, [kOuterExtent], 'local');
+
+    // Step 3: locate the inner reduction body
+    //  After split, structure is: for(k_outer) { for(k_inner) { body } }
+    //  We need to:
+    //    a) wrap k_inner body as: acc_rf[k_outer] += body_value
+    //    b) annotate k_outer as parallel
+    //    c) append a merge loop after the k_outer loop
+    //
+    //  Implementation strategy: transform the AST that contains
+    //  the k_outer ForNode (which already wraps k_inner after split).
+
+    this.func.body = this.injectRfactorBuffers(
+      this.func.body,
+      kOuter.name,
+      kInner.name,
+      accRf,
+      kOuterExtent
+    );
+    this.func.allocations = [...this.func.allocations, accRf];
+
+    // Step 4: annotate k_outer as parallel
     this.annotate(kOuter.name, 'parallel');
+
+    this.rebuildLoopMap();
     return [kOuter, kInner];
+  }
+
+  // Helper: find the k_outer ForNode in the AST, transform it to:
+  //   for k_outer (parallel):
+  //     acc_rf[k_outer] = 0
+  //     for k_inner: acc_rf[k_outer] += ...
+  // Then append a merge loop: for k_outer: acc += acc_rf[k_outer]
+  // And replace the original acc buffer store with acc += merge_result
+  private injectRfactorBuffers(
+    stmt: Stmt,
+    kOuterName: string,
+    kInnerName: string,
+    accRf: BufferDecl,
+    kOuterExtent: number
+  ): Stmt {
+    if (stmt instanceof ForNode) {
+      // If this is the k_outer loop, transform it
+      if (stmt.loopVar.name === kOuterName) {
+        return this.buildRfactorNode(stmt, kInnerName, accRf, kOuterExtent);
+      }
+      // Otherwise recurse into body
+      const newBody = this.injectRfactorBuffers(stmt.body, kOuterName, kInnerName, accRf, kOuterExtent);
+      return new ForNode(stmt.loopVar, stmt.min, stmt.extent, newBody, stmt.annotation);
+    }
+    if (stmt instanceof SeqNode) {
+      const newStmts = stmt.stmts.map(s =>
+        this.injectRfactorBuffers(s, kOuterName, kInnerName, accRf, kOuterExtent)
+      );
+      return new SeqNode(newStmts);
+    }
+    if (stmt instanceof AllocNode) {
+      const newBody = this.injectRfactorBuffers(stmt.body, kOuterName, kInnerName, accRf, kOuterExtent);
+      return new AllocNode(stmt.buffer, newBody);
+    }
+    return stmt;
+  }
+
+  // Build the rfactor transformation for the k_outer loop and its context:
+  //   Rewrites k_inner body to accumulate into acc_rf[k_outer],
+  //   adds an init store, and appends a merge loop.
+  //   Returns a SeqNode: [k_outer_parallel_loop, merge_loop, final_store]
+  private buildRfactorNode(
+    kOuterFor: ForNode,     // for(k_outer) { for(k_inner) { ... store to acc ... } }
+    kInnerName: string,
+    accRf: BufferDecl,
+    kOuterExtent: number
+  ): Stmt {
+    const kOuterVar = kOuterFor.loopVar;
+    const kInnerFor = kOuterFor.body;
+
+    // Extract the innermost BufferStore(s) that write to acc
+    // and rewrite them to write to acc_rf[k_outer] instead
+    const rewrittenKInnerBody = this.rewriteAccToRf(
+      kInnerFor instanceof ForNode ? kInnerFor.body : kInnerFor,
+      accRf,
+      kOuterVar
+    );
+
+    // Init store: acc_rf[k_outer] = 0 (runs at start of each k_outer iteration)
+    const initNode = new BufferStoreNode(
+      accRf,
+      [new VarIndex(kOuterVar)],
+      new ConstExpr(0)
+    );
+
+    // Rebuild k_inner loop with rewritten body
+    const newKInnerFor = kInnerFor instanceof ForNode
+      ? new ForNode(kInnerFor.loopVar, kInnerFor.min, kInnerFor.extent, rewrittenKInnerBody, kInnerFor.annotation)
+      : rewrittenKInnerBody;
+
+    // k_outer loop body: [init acc_rf[k_outer]=0, k_inner loop]
+    const kOuterBody = new SeqNode([initNode, newKInnerFor]);
+    const kOuterParallel = new ForNode(kOuterVar, 0, kOuterExtent, kOuterBody, 'parallel');
+
+    // Merge loop: for k_outer: accumulate acc_rf[k_outer] into a local acc
+    // We represent this as a simple reduction ForNode that sums acc_rf
+    const mergeVar = new LoopVar(`${kOuterVar.name}_merge`, 'reduction');
+    const mergeLoad = new BufferLoadExpr(accRf, [new VarIndex(mergeVar)]);
+
+    // Find the original acc buffer from the context (it's in func.allocations)
+    // Look for the 'acc' buffer declared in allocations
+    const accBuf = this.func.allocations.find(a => a.name === 'acc');
+    const mergeTarget = accBuf ?? new BufferDecl('acc', [1], 'local');
+
+    const mergeBody = new BufferStoreNode(
+      mergeTarget,
+      [new ConstIndex(0)],
+      new BinOpExpr('+',
+        new BufferLoadExpr(mergeTarget, [new ConstIndex(0)]),
+        mergeLoad
+      )
+    );
+    const mergeLoop = new ForNode(mergeVar, 0, kOuterExtent, mergeBody, 'none');
+
+    // acc = 0 before merge
+    const mergeInit = new BufferStoreNode(
+      mergeTarget,
+      [new ConstIndex(0)],
+      new ConstExpr(0)
+    );
+
+    return new SeqNode([kOuterParallel, mergeInit, mergeLoop]);
+  }
+
+  // Rewrite all BufferStore to 'acc' within the k_inner body
+  // to instead accumulate into acc_rf[k_outer]
+  private rewriteAccToRf(stmt: Stmt, accRf: BufferDecl, kOuterVar: LoopVar): Stmt {
+    if (stmt instanceof BufferStoreNode && stmt.buffer.name === 'acc') {
+      // acc[0] += val → acc_rf[k_outer] += val
+      return new BufferStoreNode(
+        accRf,
+        [new VarIndex(kOuterVar)],
+        this.rewriteAccLoadsInValue(stmt.value, accRf, kOuterVar)
+      );
+    }
+    if (stmt instanceof SeqNode) {
+      return new SeqNode(stmt.stmts.map(s => this.rewriteAccToRf(s, accRf, kOuterVar)));
+    }
+    if (stmt instanceof ForNode) {
+      return new ForNode(stmt.loopVar, stmt.min, stmt.extent,
+        this.rewriteAccToRf(stmt.body, accRf, kOuterVar), stmt.annotation);
+    }
+    if (stmt instanceof AllocNode) {
+      return new AllocNode(stmt.buffer, this.rewriteAccToRf(stmt.body, accRf, kOuterVar));
+    }
+    return stmt;
+  }
+
+  // Rewrite any BufferLoad from 'acc[0]' to 'acc_rf[k_outer]' within a value expression
+  private rewriteAccLoadsInValue(val: ValueExpr, accRf: BufferDecl, kOuterVar: LoopVar): ValueExpr {
+    if (val instanceof BufferLoadExpr && val.buffer.name === 'acc') {
+      return new BufferLoadExpr(accRf, [new VarIndex(kOuterVar)]);
+    }
+    if (val instanceof BinOpExpr) {
+      return new BinOpExpr(
+        val.op,
+        this.rewriteAccLoadsInValue(val.left, accRf, kOuterVar),
+        this.rewriteAccLoadsInValue(val.right, accRf, kOuterVar)
+      );
+    }
+    if (val instanceof MaxExpr) {
+      return new MaxExpr(
+        this.rewriteAccLoadsInValue(val.left, accRf, kOuterVar),
+        this.rewriteAccLoadsInValue(val.right, accRf, kOuterVar)
+      );
+    }
+    if (val instanceof MinExpr) {
+      return new MinExpr(
+        this.rewriteAccLoadsInValue(val.left, accRf, kOuterVar),
+        this.rewriteAccLoadsInValue(val.right, accRf, kOuterVar)
+      );
+    }
+    if (val instanceof CallExprTIR) {
+      return new CallExprTIR(val.funcName, val.args.map(a => this.rewriteAccLoadsInValue(a, accRf, kOuterVar)));
+    }
+    return val;
   }
 
   // ─── COMPUTE AT (stub) ───
@@ -327,7 +532,8 @@ export class Schedule {
       );
     }
     if (val.kind === 'load') {
-      return { ...val, indices: val.indices.map(i => this.rewriteIndex(i, oldName, outerVar, innerVar, factor)) } as any;
+      const v = val as BufferLoadExpr;
+      return new BufferLoadExpr(v.buffer, v.indices.map(i => this.rewriteIndex(i, oldName, outerVar, innerVar, factor)));
     }
     if (val.kind === 'binop') {
       return new BinOpExpr(val.op,
@@ -336,13 +542,15 @@ export class Schedule {
       );
     }
     if (val.kind === 'max') {
-      return { ...val,
-        left: this.rewriteValue(val.left, oldName, outerVar, innerVar, factor),
-        right: this.rewriteValue(val.right, oldName, outerVar, innerVar, factor),
-      } as any;
+      const v = val as MaxExpr;
+      return new MaxExpr(
+        this.rewriteValue(v.left, oldName, outerVar, innerVar, factor),
+        this.rewriteValue(v.right, oldName, outerVar, innerVar, factor)
+      );
     }
     if (val.kind === 'call') {
-      return { ...val, args: val.args.map(a => this.rewriteValue(a, oldName, outerVar, innerVar, factor)) } as any;
+      const v = val as CallExprTIR;
+      return new CallExprTIR(v.funcName, v.args.map(a => this.rewriteValue(a, oldName, outerVar, innerVar, factor)));
     }
     return val;
   }

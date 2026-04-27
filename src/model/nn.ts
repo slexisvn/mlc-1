@@ -8,7 +8,7 @@ import { NDArray } from '../tensor/ndarray.js';
 import { GradTensor } from '../autograd/engine.js';
 import {
   denseOp, biasAddOp, reluOp, sigmoidOp, tanhOp,
-  leakyReluOp, softmaxOp
+  leakyReluOp, softmaxOp, batchNormOp
 } from '../autograd/grad_ops.js';
 
 export abstract class Module {
@@ -114,5 +114,45 @@ export class Sequential extends Module {
       params.push(...layer.parameters());
     }
     return params;
+  }
+}
+
+// ─── BATCH NORM ───────────────────────────────────────────────
+// What it does:
+//   Normalizes activations per mini-batch to zero mean, unit variance,
+//   then scales and shifts with learnable parameters γ and β.
+//   This stabilizes training and enables larger learning rates.
+//
+//   γ (scale) initializes to 1 (identity scale — no change on first pass)
+//   β (shift) initializes to 0 (no bias on first pass)
+//
+// Usage in a model:
+//   new Sequential([
+//     new Linear(32, 64),
+//     new BatchNorm(64),   ← after linear, before activation
+//     new ReLU(),
+//   ])
+export class BatchNorm extends Module {
+  numFeatures: number;
+  eps: number;
+  gamma: GradTensor;   // learnable scale: [1, numFeatures]
+  beta: GradTensor;    // learnable shift: [1, numFeatures]
+
+  constructor(numFeatures: number, eps = 1e-5) {
+    super();
+    this.numFeatures = numFeatures;
+    this.eps = eps;
+    // γ = 1 (ones), β = 0 (zeros) — identity transform initially
+    this.gamma = new GradTensor(NDArray.ones([1, numFeatures]), true);
+    this.beta = new GradTensor(NDArray.zeros([1, numFeatures]), true);
+  }
+
+  forward(x: GradTensor): GradTensor {
+    // x: [B, numFeatures]
+    return batchNormOp(x, this.gamma, this.beta, this.eps);
+  }
+
+  parameters(): GradTensor[] {
+    return [this.gamma, this.beta];
   }
 }

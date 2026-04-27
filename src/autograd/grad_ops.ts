@@ -264,3 +264,151 @@ export function negOp(A: GradTensor): GradTensor {
   );
   return result;
 }
+
+// ─── BATCH NORM ────────────────────────────────────────────────
+// What it does (MLC concept):
+//   Normalize a mini-batch of activations to zero mean and unit variance,
+//   then scale/shift with learnable parameters γ (scale) and β (shift).
+//
+//   Training forward:
+//     μ = mean(x, axis=0)             [1, C]  per-feature mean
+//     σ² = var(x, axis=0)             [1, C]  per-feature variance
+//     x̂ = (x - μ) / sqrt(σ² + ε)    [B, C]  normalized
+//     y  = γ * x̂ + β                 [B, C]  rescaled
+//
+//   Backward (through normalization + scale/shift):
+//     dγ = sum(dY * x̂, axis=0)
+//     dβ = sum(dY, axis=0)
+//     dx̂ = dY * γ
+//     dvar = sum(dx̂ * (x - μ) * -0.5 * (σ² + ε)^(-3/2), axis=0)
+//     dmean = sum(dx̂ * -1/sqrt(σ²+ε), axis=0) + dvar * mean(-2(x-μ), axis=0)
+//     dx = dx̂ / sqrt(σ²+ε) + dvar * 2(x-μ)/N + dmean/N
+//
+//   Why it matters:
+//     - Stabilizes and accelerates training (reduces covariate shift)
+//     - Enables much higher learning rates
+//     - Each call is a "batch_norm" node in the IR; shape-preserving
+//
+// Inputs:
+//   x    : [B, C]  — input activations
+//   gamma: [1, C]  — learnable scale
+//   beta : [1, C]  — learnable shift
+//   eps  : scalar  — numerical stability (default 1e-5)
+// ──────────────────────────────────────────────────────────────
+export function batchNormOp(
+  x: GradTensor,
+  gamma: GradTensor,
+  beta: GradTensor,
+  eps = 1e-5
+): GradTensor {
+  const [B, C] = x.data.shape;
+
+  // Compute per-feature mean and variance
+  const mean = new Float32Array(C);
+  const variance = new Float32Array(C);
+
+  for (let c = 0; c < C; c++) {
+    let sum = 0;
+    for (let b = 0; b < B; b++) sum += x.data.data[b * C + c];
+    mean[c] = sum / B;
+  }
+  for (let c = 0; c < C; c++) {
+    let sq = 0;
+    for (let b = 0; b < B; b++) {
+      const diff = x.data.data[b * C + c] - mean[c];
+      sq += diff * diff;
+    }
+    variance[c] = sq / B;
+  }
+
+  // x̂ = (x - μ) / sqrt(σ² + ε)
+  const xHatData = new Float32Array(B * C);
+  const stdInv = new Float32Array(C);
+  for (let c = 0; c < C; c++) stdInv[c] = 1 / Math.sqrt(variance[c] + eps);
+
+  for (let b = 0; b < B; b++) {
+    for (let c = 0; c < C; c++) {
+      xHatData[b * C + c] = (x.data.data[b * C + c] - mean[c]) * stdInv[c];
+    }
+  }
+
+  // y = γ * x̂ + β
+  const yData = new Float32Array(B * C);
+  for (let b = 0; b < B; b++) {
+    for (let c = 0; c < C; c++) {
+      const idx = b * C + c;
+      yData[idx] = gamma.data.data[c] * xHatData[idx] + beta.data.data[c];
+    }
+  }
+
+  const result = new GradTensor(new NDArray(yData, [B, C]), true);
+
+  // Save intermediates for backward
+  const savedX = x.data;
+  const savedGamma = gamma.data;
+  const savedXHat = new NDArray(new Float32Array(xHatData), [B, C]);
+  const savedStdInv = new Float32Array(stdInv);
+  const savedMean = new Float32Array(mean);
+
+  engine.record('batch_norm', [x, gamma, beta], result,
+    [savedX, savedGamma, savedXHat],
+    (dY, [_sx, _sg, xHat]) => {
+      const dYd = dY.data;
+
+      // dγ = sum(dY * x̂, axis=0): [1, C]
+      const dGamma = new Float32Array(C);
+      // dβ = sum(dY, axis=0): [1, C]
+      const dBeta = new Float32Array(C);
+      // dx̂ = dY * γ
+      const dXhat = new Float32Array(B * C);
+
+      for (let c = 0; c < C; c++) {
+        for (let b = 0; b < B; b++) {
+          const idx = b * C + c;
+          dGamma[c] += dYd[idx] * xHat.data[idx];
+          dBeta[c] += dYd[idx];
+          dXhat[idx] = dYd[idx] * savedGamma.data[c];
+        }
+      }
+
+      // dvar = sum(dx̂ * (x - μ) * -0.5 * stdInv³, axis=0)
+      const dVar = new Float32Array(C);
+      for (let c = 0; c < C; c++) {
+        const si3 = savedStdInv[c] * savedStdInv[c] * savedStdInv[c];
+        for (let b = 0; b < B; b++) {
+          const diff = savedX.data[b * C + c] - savedMean[c];
+          dVar[c] += dXhat[b * C + c] * diff * (-0.5) * si3;
+        }
+      }
+
+      // dmean = sum(dx̂ * -stdInv, axis=0) + dvar * mean(-2(x-μ), axis=0)
+      const dMean = new Float32Array(C);
+      for (let c = 0; c < C; c++) {
+        for (let b = 0; b < B; b++) {
+          dMean[c] += dXhat[b * C + c] * (-savedStdInv[c]);
+          dMean[c] += dVar[c] * (-2 * (savedX.data[b * C + c] - savedMean[c])) / B;
+        }
+      }
+
+      // dx = dx̂ * stdInv + dvar * 2(x-μ)/N + dmean/N
+      const dX = new Float32Array(B * C);
+      for (let b = 0; b < B; b++) {
+        for (let c = 0; c < C; c++) {
+          const idx = b * C + c;
+          const diff = savedX.data[idx] - savedMean[c];
+          dX[idx] = dXhat[idx] * savedStdInv[c]
+                  + dVar[c] * 2 * diff / B
+                  + dMean[c] / B;
+        }
+      }
+
+      return [
+        new NDArray(dX, [B, C]),
+        new NDArray(dGamma, [1, C]),
+        new NDArray(dBeta, [1, C])
+      ];
+    }
+  );
+
+  return result;
+}

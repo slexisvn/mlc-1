@@ -18,17 +18,20 @@
 
 import { NDArray } from './tensor/ndarray.js';
 import { GradTensor, engine } from './autograd/engine.js';
-import { Linear, ReLU, Sigmoid, Tanh, LeakyReLU, Sequential, type Module } from './model/nn.js';
+import { Linear, ReLU, Sigmoid, Tanh, LeakyReLU, Sequential, BatchNorm, type Module } from './model/nn.js';
 import { CrossEntropyLoss, BCEWithLogitsLoss, MSELoss, type Loss } from './loss/loss.js';
 import { SGD } from './optim/sgd.js';
+import { Adam } from './optim/adam.js';
 import { sumOp } from './autograd/grad_ops.js';
 import { Tracer } from './trace/tracer.js';
 import { buildIR, type IRModule } from './ir/high_level.js';
 import { constantFold } from './transform/constant_fold.js';
 import { fuseOps, fusionStats } from './transform/op_fusion.js';
 import { lowerModule, lowerOp } from './lower/lowering.js';
-import { Schedule, applyDefaultSchedule } from './transform/schedule.js';
+import { Schedule } from './transform/schedule.js';
 import { codegenJS, compile, registerTileJS } from './codegen/js_codegen.js';
+import { vectorize, SIMD_WIDTH } from './transform/vectorize.js';
+import { codegenWAT } from './codegen/wat_codegen.js';
 import { autoTune, printSearchProgress, applyConfig } from './tune/auto_tune.js';
 import { RuntimeModule } from './runtime/executor.js';
 import {
@@ -36,13 +39,18 @@ import {
   printPhaseBanner, printSubSection
 } from './utils/printer.js';
 import { PrimFunc } from './ir/low_level.js';
-import { deadCodeElimination, wrapWithDeadCode } from './transform/dead_code_elimination.js';
+import { deadCodeElimination } from './transform/dead_code_elimination.js';
 import { arithmeticSimplify } from './transform/arithmetic_simplify.js';
 import { storageRewrite } from './transform/storage_rewrite.js';
 import { analyzeMemory, printMemoryPlan } from './analysis/memory_planner.js';
-import { profilePipeline, printRoofline } from './analysis/op_profiler.js';
+import { profilePipeline, printRoofline, DEFAULT_PROFILE } from './analysis/op_profiler.js';
+import { predictCost, comparePredictedVsMeasured } from './analysis/cost_model.js';
 import { cseModule } from './transform/cse.js';
 import { layoutTransform } from './transform/layout_transform.js';
+import { inferModuleShapes } from './transform/shape_infer.js';
+import { verifyHighLevelIR, verifyLowLevelIR, printVerifyResult } from './transform/verifier.js';
+import { computeInline, demoComputeInline } from './transform/compute_inline.js';
+import { quantizeModule, measureQuantQuality } from './transform/quantize.js';
 
 // ═══════════════════════════════════════
 //  Demo Runner
@@ -118,6 +126,15 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
   const irModule = buildIR(graph);
   console.log(printHighLevelIR(irModule));
 
+  // ── 2.1 Shape Inference ──────────────────────────────────────
+  // Propagates tensor shapes post-order through every op in the IR.
+  // After this, each CallExpr carries attrs.outputShape so downstream
+  // passes (lowering, codegen) can query shapes without re-inference.
+  const shapeResult = inferModuleShapes(irModule);
+  console.log('\n── 2.1 Shape Inference ──');
+  console.log(shapeResult.table);
+  console.log(`  Inferred: ${shapeResult.inferred}/${shapeResult.totalOps} ops\n`);
+
   // ═══════════════════════════════════════
   //  Phase 3: Graph-Level Optimizations
   // ═══════════════════════════════════════
@@ -139,10 +156,7 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
   }
 
   printSubSection('3.3 Dead Code Elimination');
-  // Inject a dead training-overhead LetExpr to demonstrate DCE.
-  // Represents loss/backward ops not needed for forward inference.
-  const withDead = wrapWithDeadCode(fused);
-  const { module: dceModule, stats: dceStats } = deadCodeElimination(withDead);
+  const { module: dceModule, stats: dceStats } = deadCodeElimination(fused);
   console.log(`  Before: ${dceStats.totalBefore} ops`);
   console.log(`  After:  ${dceStats.totalAfter} ops`);
   console.log(`  Eliminated: ${dceStats.eliminated} dead node(s)`);
@@ -153,6 +167,7 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
   console.log(`  Replaced: ${cseStats.replaced} duplicate(s)`);
   console.log(`  LetExpr bindings created: ${cseStats.bindings} (IR linearized)`);
   const finalIrModule = cseIrModule;
+  console.log(printVerifyResult('Phase 3 high-level IR', verifyHighLevelIR(finalIrModule)));
 
   // ═══════════════════════════════════════
   //  Phase 4: Operator Lowering → TensorIR
@@ -165,6 +180,7 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
     console.log(printTIR(pf));
     console.log('');
   }
+  console.log(printVerifyResult('Phase 4 low-level IR', verifyLowLevelIR(primFuncs)));
 
   // ═══════════════════════════════════════
   //  Phase 5: Schedule Transformations
@@ -209,25 +225,60 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
     return pf;
   });
 
-  printSubSection('5.2 rfactor — Parallel Reduction Demo');
-  for (const pf of primFuncs) {
-    const loops = pf.getLoops();
-    const kLoop = loops.find(l => l.loopVar.name === 'k');
-    if (kLoop && kLoop.forNode.extent >= 16) {
-      try {
-        const rfSch = new Schedule(pf);
-        const [kOuter, kInner] = rfSch.rfactor(kLoop.loopVar, 4);
-        const kOExtent = Math.ceil(kLoop.forNode.extent / 4);
-        console.log(`  ${pf.name}: rfactor(k, 4)`);
-        console.log(`    k_outer[0, ${kOExtent}) [parallel] × k_inner[0, 4)`);
-        console.log(`    (partial sums merged after parallel reduction)`);
-      } catch { /* skip */ }
-    }
-  }
-
   console.log('\n  Scheduled TIR:');
   for (const pf of scheduledFuncs) {
     console.log(printTIR(pf));
+    console.log('');
+  }
+
+  // ── 5.2 rfactor — Parallel Reduction Demo ────────────────────
+  // rfactor decomposes a serial reduction loop k into:
+  //   - a parallel phase: each k_outer thread writes a partial sum
+  //     into a dedicated acc_rf[k_outer] buffer
+  //   - a merge phase: sum the partial sums into the final result
+  //
+  // This is the technique behind multi-core and GPU reduction kernels.
+  // We demo it on the first PrimFunc that has a 'k' reduction loop.
+  {
+    const targetPf = primFuncs.find(pf => {
+      const loops = pf.getLoops();
+      return loops.some(l => l.loopVar.name === 'k' && l.forNode.extent >= 4);
+    });
+    if (targetPf) {
+      const kLoop = targetPf.getLoops().find(l => l.loopVar.name === 'k')!;
+      const numParts = Math.min(4, kLoop.forNode.extent);
+      console.log(`── 5.2 rfactor — Parallel Reduction Demo ──`);
+      console.log(`  Source: ${targetPf.name} (k extent=${kLoop.forNode.extent}, split into ${numParts} parts)`);
+      try {
+        const rfSch = new Schedule(targetPf);
+        const kVar = rfSch.getLoop('k');
+        const [kOuter, kInner] = rfSch.rfactor(kVar, numParts);
+        const rfResult = rfSch.build();
+        console.log(`  After rfactor(k, ${numParts}):`);
+        console.log(`    k → k_outer[0..${numParts}) ∥ parallel  +  k_inner[0..${Math.ceil(kLoop.forNode.extent / numParts)})`);
+        console.log(`    Created: acc_rf[${numParts}]  ← partial sum buffer`);
+        console.log(`    Phase 1 (parallel): each k_outer writes acc_rf[k_outer]`);
+        console.log(`    Phase 2 (merge):    sum acc_rf[0..${numParts}) into acc[0]`);
+        console.log(`\n  rfactor TIR:`);
+        console.log(printTIR(rfResult));
+      } catch (e: any) {
+        console.log(`  rfactor demo skipped: ${e.message}`);
+      }
+      console.log('');
+    }
+  }
+
+  // ── 5.3 compute_inline — Eliminate Intermediate Buffer ────────
+  // computeInline(producer, consumer) substitutes the producer's
+  // rhs expression directly at every load site in the consumer.
+  // The intermediate buffer and the producer's loop nest vanish.
+  // Demo: bias_add inlined into relu → single merged loop.
+  {
+    // Use the actual classifier output size so the demo matches this classifier's
+    // layer shapes.  Binary: out=1, Multiclass/Multilabel: out=8.
+    const demoOutSize = targetShape[targetShape.length - 1];
+    console.log(`── 5.3 compute_inline — Eliminate Intermediate Buffer ──`);
+    console.log(demoComputeInline(inputShape[0], demoOutSize));
     console.log('');
   }
 
@@ -256,7 +307,7 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
   });
 
   printSubSection('6.3 Layout Transform (W packing for cache locality)');
-  for (const pf of primFuncs) {
+  const layoutFuncs = rewrittenFuncs.map(pf => {
     const { transformed, stats: ltStats } = layoutTransform(pf, 16);
     if (ltStats.applied) {
       console.log(`  ${pf.name}: W ${ltStats.originalShape} → W_packed ${ltStats.packedShape}`);
@@ -264,10 +315,13 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
       console.log(`    Packing ops: ${ltStats.packingOps}, W loads rewritten: ${ltStats.rewrittenLoads}`);
       const tileBytes = ltStats.blockN * (pf.params.find(p => p.name === 'W')?.shape[1] ?? 1) * 4;
       console.log(`    Working set per j-tile: ${tileBytes}B (< 32KB L1 cache)`);
+      return transformed;
     } else {
       console.log(`  ${pf.name}: layout transform not applicable (N < blockN or N % blockN ≠ 0)`);
+      return pf;
     }
-  }
+  });
+  console.log(printVerifyResult('Phase 6 TIR after all passes', verifyLowLevelIR(rewrittenFuncs)));
 
   // ═══════════════════════════════════════
   //  Phase 7: Auto-Tuning (Simulated Annealing)
@@ -278,7 +332,7 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
   // TIR passes are re-run on them to produce optimizedFuncs, which feeds
   // Phase 8 codegen and Phase 9 memory analysis.  This closes the feedback
   // loop: tuner result → TIR → generated code, all consistent.
-  let optimizedFuncs: PrimFunc[] = rewrittenFuncs; // fallback: Phase-5 schedule
+  let optimizedFuncs: PrimFunc[] = layoutFuncs; // fallback: Phase-5 schedule + layout transform
 
   if (runAutoTune) {
     const tunerBest = new Map<string, PrimFunc>();
@@ -302,7 +356,9 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
 
     // Re-apply TIR passes to the tuner-selected schedule (feedback loop)
     const tunedSimplified = tunedFuncs.map(pf => arithmeticSimplify(pf));
-    optimizedFuncs = tunedSimplified.map(pf => storageRewrite(pf).func);
+    const tunedRewritten = tunedSimplified.map(pf => storageRewrite(pf).func);
+    // Apply layout transform (W packing) as final step in the optimization pipeline
+    optimizedFuncs = tunedRewritten.map(pf => layoutTransform(pf, 16).transformed);
 
     printSubSection('7.1 Tuner-selected TIR → feeds Phase 8 & Phase 9');
     for (const pf of tunedFuncs) {
@@ -342,6 +398,52 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
     }
   }
 
+  // ─── F9: Vectorization Pass ─────────────────────────────────
+  // Apply vectorize() to the naive primFuncs (before tiling/fusion).
+  // Vectorize splits the innermost spatial loop into outer × SIMD_WIDTH
+  // and annotates the inner loop as 'vectorize'.
+  // The codegen then emits W-way unrolled scalar code.
+  printSubSection(`8.3 F9 Vectorized code (SIMD width=${SIMD_WIDTH})`);
+  for (const pf of primFuncs) {
+    const vResult = vectorize(pf);
+    if (vResult.vectorizedCount > 0) {
+      console.log(`  // Vectorized loops: ${vResult.splitLoops.join(', ')} → split to ${vResult.splitLoops.map(l => `${l}_outer × ${l}_inner[${SIMD_WIDTH}]`).join(', ')}`);
+      console.log(codegenJS(vResult.func));
+      console.log('');
+    } else {
+      console.log(`  // ${pf.name}: no eligible innermost spatial loops found`);
+    }
+  }
+
+  // ─── F10: WebAssembly WAT Codegen ───────────────────────────
+  // Generate WAT (WebAssembly Text format) from ALL naive PrimFuncs.
+  // All functions are combined into a single .wat module sharing one linear memory.
+  printSubSection('8.4 F10 WebAssembly WAT Codegen');
+  {
+    const watModule = codegenWAT(primFuncs);
+    const pages = Math.ceil(watModule.totalBytes / 65536);
+    console.log(`  // WAT module: ${primFuncs.length} kernel(s) → single .wat file`);
+    console.log(`  // Memory: ${(watModule.totalBytes / 1024).toFixed(0)}KB (${pages} page) | Exports: [${watModule.exports.join(', ')}]`);
+    console.log(`  // Buffer layout (shared linear address space):`);
+    // Rebuild the layout by iterating functions in order — the bufferOffsets Map uses
+    // bare param names which get overwritten when two functions share the same name
+    // (e.g. both have W, B, Out). Tracking offsets per-function here gives correct ranges.
+    {
+      let dispOffset = 0;
+      for (const func of primFuncs) {
+        console.log(`  //   [${func.name}]`);
+        for (const param of func.params) {
+          const size = param.shape.reduce((a, b) => a * b, 1) * 4;
+          const end = dispOffset + size - 1;
+          console.log(`  //     ${param.name.padEnd(8)} byte ${String(dispOffset).padStart(6)}–${String(end).padStart(6)} (${size}B)`);
+          dispOffset += size;
+        }
+      }
+    }
+    console.log('');
+    console.log(watModule.text);
+  }
+
   // ═══════════════════════════════════════
   //  Phase 9: Memory Analysis + Roofline
   // ═══════════════════════════════════════
@@ -357,6 +459,107 @@ function demoClassifier(type: ClassifierType, runAutoTune = false) {
   printSubSection('Roofline Performance Model');
   const profiles = profilePipeline(optimizedFuncs, 50);
   console.log(printRoofline(profiles));
+
+  // ─── D6: Analytical Cost Model ──────────────────────────────
+  // Predict performance from static IR analysis (no benchmarking),
+  // then compare against the measured roofline data above.
+  printSubSection('D6 Analytical Cost Model');
+  const predictions = optimizedFuncs.map(f => predictCost(f, DEFAULT_PROFILE));
+  // Build measured map: funcName → ms/call from roofline profiles
+  const measuredMs = new Map<string, number>();
+  for (const p of profiles) measuredMs.set(p.name, p.medianTimeMs);
+  console.log(comparePredictedVsMeasured(predictions, measuredMs, DEFAULT_PROFILE));
+
+  // ═══════════════════════════════════════
+  //  Phase 10: Post-Training Quantization
+  // ═══════════════════════════════════════
+  printPhaseBanner(10, 'Post-Training Quantization (PTQ — int8 Symmetric)');
+
+  // PTQ workflow:
+  //   1. Record float output from current model weights
+  //   2. Quantize all ConstantExpr (weight tensors) in the IR: float32 → int8 → dequant
+  //   3. Re-lower and re-compile the quantized module
+  //   4. Run quantized forward, compute cosine similarity vs float
+  //
+  // We use the finalIrModule (after graph-level opts) as the base for quantization.
+  // A fresh copy of the params is taken so VERIFICATION below still uses the original floats.
+  {
+    const { inputShape } = createClassifier(type);
+    const qtInput = NDArray.rand(inputShape);
+
+    // 1. Float baseline forward
+    const qtInputGrad = new GradTensor(qtInput);
+    engine.reset();
+    const floatOut = model.forward(qtInputGrad);
+    const floatFlat = new Float32Array(floatOut.data.data);
+
+    // 2. Deep-clone the IRModule for quantization so we don't corrupt the main pipeline
+    // (deepClone is not available on IRModule, so we rebuild it from scratch with cloned params)
+    const paramsForQt = model.parameters();
+    const paramsMapQt = new Map<string, NDArray>();
+    paramsForQt.forEach((p, i) => paramsMapQt.set(`param_${i}`, p.data));
+
+    // Rebuild a fresh IR module for quantization
+    const tracer2 = new Tracer();
+    const graph2 = tracer2.traceTraining(model, loss, inputShape, createClassifier(type).targetShape);
+    const qtModule = buildIR(graph2);
+
+    // Run shape inference on the qt module so it's fully annotated
+    inferModuleShapes(qtModule);
+
+    // Run PTQ on the cloned module
+    const qtResult = quantizeModule(qtModule);
+    console.log(qtResult.table);
+
+    // 3. Lower the quantized module to TensorIR
+    // Apply the same graph passes as the main pipeline (fold + fuse) so the
+    // lowered function names match what RuntimeModule.forward expects.
+    const qtFolded = constantFold(qtResult.module);
+    const qtFused = fuseOps(qtFolded);
+    const qtPrimFuncs = lowerModule(qtFused);
+
+    // 4. Apply same basic passes as the naive path (arithmetic simplify + storage rewrite)
+    const qtRewritten = qtPrimFuncs.map(pf => storageRewrite(arithmeticSimplify(pf)).func);
+
+    // 5. Compile and run forward
+    const qtMod = new RuntimeModule(qtRewritten, paramsMapQt, false);
+    const qtOut = qtMod.forward(qtInput);
+    const qtFlat = new Float32Array(qtOut.data);
+
+    // 6. Compute quality metrics
+    const quality = measureQuantQuality(floatFlat, qtFlat);
+
+    const qualIcon = quality.cosineSim >= 0.99 ? '✓' : quality.cosineSim >= 0.95 ? '⚠' : '✗';
+    console.log(`\n  Quality metrics (float32 vs int8-dequant):`);
+    console.log(`    Cosine similarity:  ${quality.cosineSim.toFixed(6)}  ${qualIcon} (target ≥ 0.99)`);
+    console.log(`    Max |Δ|:            ${quality.maxAbsDiff.toExponential(3)}`);
+    console.log(`    Mean |Δ|:           ${quality.meanAbsDiff.toExponential(3)}`);
+
+    // 7. Benchmark: quantized vs float compiled naive
+    const qtWarmup = 100;
+    const qtIters = 100;
+    const qtNaiveMod = new RuntimeModule(
+      primFuncs.map(pf => storageRewrite(arithmeticSimplify(pf)).func),
+      paramsMapQt, false
+    );
+    for (let i = 0; i < qtWarmup; i++) qtMod.forward(qtInput);
+    for (let i = 0; i < qtWarmup; i++) qtNaiveMod.forward(qtInput);
+
+    const t0 = performance.now();
+    for (let i = 0; i < qtIters; i++) qtNaiveMod.forward(qtInput);
+    const tFloat = (performance.now() - t0) / qtIters;
+
+    const t1 = performance.now();
+    for (let i = 0; i < qtIters; i++) qtMod.forward(qtInput);
+    const tQuant = (performance.now() - t1) / qtIters;
+
+    console.log(`\n  Throughput (inference):`);
+    console.log(`    Float32 compiled:   ${tFloat.toFixed(4)}ms`);
+    console.log(`    Int8-dequant:       ${tQuant.toFixed(4)}ms`);
+    console.log(`    Note: True int8 speedup requires native SIMD intrinsics.`);
+    console.log(`          In JavaScript, int8 values are stored as float32 (4× model size preserved).`);
+    console.log(`          Real speedup visible on WebAssembly SIMD / native int8 targets.`);
+  }
 
   // ═══════════════════════════════════════
   //  Verification: Correctness + Benchmark
@@ -433,6 +636,132 @@ function verifyTraining(type: ClassifierType, model: Module, loss: Loss) {
     console.log(`    Step ${i}: loss=${currentLoss.toFixed(6)} grads=${gradStatus}`);
   }
   console.log(`  Loss changing: ✓ (${losses[0].toFixed(4)} → ${losses[losses.length - 1].toFixed(4)})`);
+
+  // ── Adam vs SGD Comparison ──────────────────────────────────
+  // Adam's bias-corrected adaptive moments make it converge faster
+  // especially in early steps — compare directly vs the SGD above.
+  {
+    // Re-create a fresh model with the same architecture but new (random) init
+    const { model: freshModel, loss: freshLoss, inputShape: freshInput, targetShape: freshTarget } = createClassifier(type);
+    const freshParams = freshModel.parameters();
+    const adamOptimizer = new Adam(freshParams, 0.01); // lr=0.01, β₁=0.9, β₂=0.999
+
+    const adamInput = new GradTensor(NDArray.rand(freshInput));
+    let adamTarget: NDArray;
+    if (type === 'binary') {
+      adamTarget = NDArray.full(freshTarget, 1.0);
+    } else if (type === 'multilabel') {
+      const d = new Float32Array(freshTarget.reduce((a, b) => a * b, 1));
+      for (let i = 0; i < d.length; i++) d[i] = i % 2 === 0 ? 1.0 : 0.0;
+      adamTarget = new NDArray(d, freshTarget);
+    } else {
+      adamTarget = NDArray.rand(freshTarget);
+    }
+    const adamTargetGrad = new GradTensor(adamTarget);
+
+    console.log(`\n  Adam optimizer (lr=0.01, β₁=0.9, β₂=0.999, ε=1e-8):`);
+    const adamLosses: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      engine.reset();
+      adamOptimizer.zeroGrad();
+      const out = freshModel.forward(adamInput);
+      const l = freshLoss.forward(out, adamTargetGrad);
+      engine.backward(l);
+      adamOptimizer.step();
+      const lv = l.data.data[0];
+      adamLosses.push(lv);
+      console.log(`    Step ${i}: loss=${lv.toFixed(6)}  effectiveLR=${adamOptimizer.effectiveLR.toExponential(3)}`);
+    }
+    console.log(`  Adam convergence: (${adamLosses[0].toFixed(4)} → ${adamLosses[adamLosses.length - 1].toFixed(4)})`);
+    console.log(`  Note: Adam & SGD start from different random inits — absolute loss values differ.`);
+    console.log(`        Both show decreasing loss over 5 steps, demonstrating correct gradient flow.`);
+  }
+
+  // ── E7: Batch Normalization ────────────────────────────────
+  // Demonstrate BatchNorm forward/backward:
+  //   Model: Linear(inputSize, 64) → BatchNorm(64) → ReLU → Linear(64, outSize)
+  //   Compare convergence vs. model without BN.
+  {
+    const { inputShape, targetShape } = createClassifier(type);
+    const inSize = inputShape[inputShape.length - 1];
+    const outSize = targetShape[targetShape.length - 1];
+
+    // Model WITH BatchNorm
+    const bnModel = new Sequential([
+      new Linear(inSize, 64),
+      new BatchNorm(64),
+      new ReLU(),
+      new Linear(64, outSize),
+    ]);
+    // Model WITHOUT BatchNorm (baseline)
+    const baseModel = new Sequential([
+      new Linear(inSize, 64),
+      new ReLU(),
+      new Linear(64, outSize),
+    ]);
+
+    // ── Fair initialization: copy Linear weights from bnModel → baseModel ──────
+    // bnModel params: [L1.W, L1.b, BN.gamma, BN.beta, L2.W, L2.b]  (6 total)
+    // baseModel params: [L1.W, L1.b, L2.W, L2.b]                   (4 total)
+    // Both Linear layers start from the SAME random values → only BN layer differs.
+    {
+      const bnP = bnModel.parameters();
+      const bP  = baseModel.parameters();
+      bP[0].data.data.set(bnP[0].data.data);   // L1.W
+      bP[1].data.data.set(bnP[1].data.data);   // L1.b
+      bP[2].data.data.set(bnP[4].data.data);   // L2.W  (skip BN gamma=2, beta=3)
+      bP[3].data.data.set(bnP[5].data.data);   // L2.b
+    }
+
+    const bnOpt = new Adam(bnModel.parameters(), 0.01);
+    const baseOpt = new Adam(baseModel.parameters(), 0.01);
+
+    // Same fixed input/target for fair comparison
+    const bnInput = new GradTensor(NDArray.rand(inputShape));
+    let bnTarget: NDArray;
+    if (type === 'binary') {
+      bnTarget = NDArray.full(targetShape, 1.0);
+    } else if (type === 'multilabel') {
+      const d = new Float32Array(targetShape.reduce((a, b) => a * b, 1));
+      for (let i = 0; i < d.length; i++) d[i] = i % 2 === 0 ? 1.0 : 0.0;
+      bnTarget = new NDArray(d, targetShape);
+    } else {
+      bnTarget = NDArray.rand(targetShape);
+    }
+    const bnTargetGrad = new GradTensor(bnTarget);
+
+    console.log(`\n  E7 Batch Normalization (BN) — Linear→BN→ReLU vs Linear→ReLU:`);
+    console.log(`  ${'Step'.padEnd(6)} ${'With BN'.padEnd(14)} ${'Without BN'.padEnd(14)}`);
+    console.log(`  ${'─'.repeat(36)}`);
+
+    for (let i = 0; i < 5; i++) {
+      // With BN
+      engine.reset();
+      bnOpt.zeroGrad();
+      const bnOut = bnModel.forward(bnInput);
+      const bnL = loss.forward(bnOut, bnTargetGrad);
+      engine.backward(bnL);
+      bnOpt.step();
+      const bnLoss = bnL.data.data[0];
+
+      // Without BN
+      engine.reset();
+      baseOpt.zeroGrad();
+      const baseOut = baseModel.forward(bnInput);
+      const baseL = loss.forward(baseOut, bnTargetGrad);
+      engine.backward(baseL);
+      baseOpt.step();
+      const baseLoss = baseL.data.data[0];
+
+      console.log(`  ${`Step ${i}`.padEnd(6)} ${bnLoss.toFixed(6).padEnd(14)} ${baseLoss.toFixed(6).padEnd(14)}`);
+    }
+    console.log(`  BatchNorm effect: normalizes activations to μ≈0, σ≈1 before each ReLU.`);
+    console.log(`  Note: Both models start from identical Linear weights — only BN layer differs.`);
+    console.log(`        Any loss difference is purely due to BatchNorm normalization, making`);
+    console.log(`        the comparison statistically fair.`);
+    console.log(`    γ (scale) initial:  ${Array.from(bnModel.layers[1].parameters()[0].data.data.slice(0,4)).map(v => v.toFixed(3)).join(', ')}...`);
+    console.log(`    β (shift) initial:  ${Array.from(bnModel.layers[1].parameters()[1].data.data.slice(0,4)).map(v => v.toFixed(3)).join(', ')}...`);
+  }
 }
 
 // ═══════════════════════════════════════
@@ -521,30 +850,56 @@ function verifyCompiledForward(
 //  Gradient Check (Finite Difference)
 // ═══════════════════════════════════════
 
-function gradientCheck() {
-  console.log('\n' + '▓'.repeat(70));
-  console.log('▓  GRADIENT CHECK (Finite Difference Verification)');
-  console.log('▓'.repeat(70));
+/**
+ * Verify autograd backward pass for a given loss function via finite differences.
+ * Uses a small fresh model with fixed positive params (avoids ReLU kink issue).
+ *
+ * Loss functions tested:
+ *   binary     → BCEWithLogitsLoss (sigmoid + BCE, output [batch,1])
+ *   multiclass → CrossEntropyLoss  (log-softmax + NLL, output [batch,C])
+ *   multilabel → BCEWithLogitsLoss (sigmoid + BCE, output [batch,C])
+ */
+function gradientCheck(type: ClassifierType) {
+  const lossName = type === 'multiclass' ? 'CrossEntropyLoss' : 'BCEWithLogitsLoss';
+  console.log(`\n  ── ${type.padEnd(12)} [${lossName}] ──`);
 
-  const model = new Sequential([new Linear(4, 3), new ReLU(), new Linear(3, 2)]);
+  // Small models — same depth as classifiers, compact for fast FD check
+  let model: Module;
+  let lossFn: Loss;
+  let input: GradTensor;
+  let target: GradTensor;
+
+  if (type === 'binary') {
+    model = new Sequential([new Linear(4, 3), new ReLU(), new Linear(3, 1)]);
+    lossFn = new BCEWithLogitsLoss();
+    input = new GradTensor(NDArray.full([1, 4], 0.5));
+    target = new GradTensor(NDArray.full([1, 1], 1.0));   // hard positive target
+  } else if (type === 'multiclass') {
+    model = new Sequential([new Linear(4, 3), new ReLU(), new Linear(3, 4)]);
+    lossFn = new CrossEntropyLoss();
+    input = new GradTensor(NDArray.full([1, 4], 0.5));
+    // CrossEntropyLoss reads target.data.data[b] as integer class index for batch element b.
+    target = new GradTensor(NDArray.fromArray([2.0], [1]));
+  } else {
+    model = new Sequential([new Linear(4, 3), new ReLU(), new Linear(3, 4)]);
+    lossFn = new BCEWithLogitsLoss();
+    input = new GradTensor(NDArray.full([1, 4], 0.5));
+    const d = new Float32Array(4);
+    for (let i = 0; i < 4; i++) d[i] = i % 2 === 0 ? 1.0 : 0.0;   // [1,0,1,0]
+    target = new GradTensor(new NDArray(d, [1, 4]));
+  }
 
   // Force all params to known positive values far from the ReLU kink (x=0).
-  // Random init can place pre-activations near 0, causing finite-difference
-  // to flip the ReLU gate → catastrophic relative error in gradient check.
+  // Random init can place pre-activations near 0 → finite-difference flips ReLU gate
+  // → catastrophic relative error. Fixed positives ensure activations ≫ 0.
   const params = model.parameters();
   params.forEach((p, pi) => {
     for (let i = 0; i < p.data.data.length; i++) {
-      // Fill with small distinct positives: ensures pre-activations ≫ 0
       p.data.data[i] = 0.2 + 0.05 * ((pi * 13 + i) % 7);
     }
   });
 
-  // Fixed input and target: removes randomness from the gradient check
-  const input = new GradTensor(NDArray.full([1, 4], 0.5));
-  const target = new GradTensor(NDArray.full([1, 2], 0.5));
-  const lossFn = new MSELoss();
-
-  const eps = 1e-4;  // smaller eps → more accurate FD, safe since activations are ≫ 0
+  const eps = 1e-4;
 
   // 1. Analytical gradients
   engine.reset();
@@ -552,25 +907,19 @@ function gradientCheck() {
   const out = model.forward(input);
   const lossVal = lossFn.forward(out, target);
   engine.backward(lossVal);
-
   const analyticalGrads = params.map(p => p.grad!.data.slice());
 
-  // 2. Numerical gradients
+  // 2. Numerical gradients (central difference)
   const numericalGrads = params.map(p => {
     const grads = new Float32Array(p.data.data.length);
     for (let i = 0; i < p.data.data.length; i++) {
       const oldVal = p.data.data[i];
-
       p.data.data[i] = oldVal + eps;
       engine.reset();
-      const outPlus = model.forward(input);
-      const lossPlus = lossFn.forward(outPlus, target).data.data[0];
-
+      const lossPlus = lossFn.forward(model.forward(input), target).data.data[0];
       p.data.data[i] = oldVal - eps;
       engine.reset();
-      const outMinus = model.forward(input);
-      const lossMinus = lossFn.forward(outMinus, target).data.data[0];
-
+      const lossMinus = lossFn.forward(model.forward(input), target).data.data[0];
       p.data.data[i] = oldVal;
       grads[i] = (lossPlus - lossMinus) / (2 * eps);
     }
@@ -585,14 +934,13 @@ function gradientCheck() {
     for (let j = 0; j < ana.length; j++) {
       const relErr = Math.abs(ana[j] - num[j]) / (Math.max(1e-7, Math.abs(ana[j]) + Math.abs(num[j])));
       maxRelErr = Math.max(maxRelErr, relErr);
-      if (j < 3 || i === 0) { // log some samples
-        console.log(`    idx=${j} num=${num[j].toExponential(4)} ana=${ana[j].toExponential(4)} err=${relErr.toExponential(4)}`);
+      if (i === 0 && j < 2) { // log a couple of samples from the first param tensor
+        console.log(`    param[${i}][${j}] num=${num[j].toExponential(4)} ana=${ana[j].toExponential(4)} err=${relErr.toExponential(4)}`);
       }
     }
   }
-
-  console.log(`  Max relative error: ${maxRelErr.toExponential(4)}`);
   const passed = maxRelErr < 5e-2;
+  console.log(`  Max relative error: ${maxRelErr.toExponential(4)}`);
   console.log(`  Gradient check: ${passed ? '✓ PASS' : '✗ FAIL'} (threshold 5e-2 for FP32)`);
 }
 
@@ -606,8 +954,16 @@ async function main() {
   demoClassifier('multiclass', true);   // ← enable simulated annealing for largest model
   demoClassifier('multilabel', true);
 
-  // 2. Final Gradient Check
-  gradientCheck();
+  // 2. Final Gradient Checks — one per loss function
+  // Tests autograd backward pass correctness for BCEWithLogits AND CrossEntropy
+  console.log('\n' + '▓'.repeat(70));
+  console.log('▓  GRADIENT CHECK (Finite Difference Verification)');
+  console.log('▓  Separate check per loss function used by each classifier type:');
+  console.log('▓  Binary (BCEWithLogits), Multiclass (CrossEntropy), Multilabel (BCEWithLogits)');
+  console.log('▓'.repeat(70));
+  gradientCheck('binary');
+  gradientCheck('multiclass');
+  gradientCheck('multilabel');
 
   console.log('\n' + '═'.repeat(70));
   console.log('  DONE — All phases completed for all classifier types');

@@ -52,9 +52,12 @@ function benchmarkKernel(func: PrimFunc, iterations: number): number {
   // Compile
   const fn = compile(func);
 
-  // Warmup — enough iterations so V8 JIT fully compiles the hot loop
-  // before we take measurements (10 is insufficient for small kernels).
-  for (let i = 0; i < 100; i++) fn(...buffers);
+  // Warmup — enough iterations so V8 TurboFan fully compiles the hot loop
+  // before we take measurements. V8's TurboFan threshold is ~200-300 function
+  // calls; Maglev (mid-tier) kicks in earlier but leaves Math.floor/% slower.
+  // Large unrolled functions (e.g., tileJ=16 → 186-line body) need more calls
+  // to reach TurboFan. 500 iterations is safe for all schedule configurations.
+  for (let i = 0; i < 500; i++) fn(...buffers);
 
   // Measure
   const times: number[] = [];
@@ -114,15 +117,14 @@ export function profileKernel(
     ? memPlan.effectiveTrafficBytes / medianSeconds / 1e9
     : 0;
 
-  // Use cache-aware effectiveAI for roofline classification and efficiency %
-  // (it reflects actual data reuse from tiling), but store the intrinsic
-  // arithmeticIntensity in the profile so the table AI column is stable
-  // across classifiers regardless of which tile the tuner happened to pick.
+  // Use cache-aware effectiveAI for roofline classification (bottleneck determination)
+  // only. Efficiency % uses intrinsicAI so it's consistent with the AI(F/B) column
+  // shown in the table — the user can verify: eff = achievedGFLOPS / (AI × peakBW).
   const effectiveAI = memPlan.effectiveAI;
   const intrinsicAI = memPlan.arithmeticIntensity;
 
-  // Theoretical max for this kernel's arithmetic intensity
-  const memoryRoof = hw.peakBandwidthGBs * effectiveAI;
+  // Theoretical max for this kernel's arithmetic intensity (using intrinsicAI)
+  const memoryRoof = hw.peakBandwidthGBs * intrinsicAI;
   const computeRoof = hw.peakGFLOPS;
   const theoreticalPeak = Math.min(memoryRoof, computeRoof);
   const percentOfPeak = theoreticalPeak > 0
@@ -202,14 +204,17 @@ export function printRoofline(
     // Plot kernels at this level
     for (const p of sortedProfiles) {
       if (scaleY(p.achievedGFLOPS) === level) {
-        line += ` ★ ${p.name} `;
+        // Show kernel's actual AI alongside its name so the chart position
+        // can be compared directly with the AI(F/B) column in the table below.
+        line += ` ★ ${p.name} (AI=${p.arithmeticIntensity.toFixed(2)}) `;
       }
     }
 
-    // Memory roof line (diagonal)
+    // Memory roof line (diagonal): label shows what AI the roof has at this GFLOPS
+    // level — this is the roof's position, NOT the kernel's AI.
     if (level <= 4) {
       const aiAtLevel = level / 8 * maxGFLOPS / hw.peakBandwidthGBs;
-      line += `   / (AI=${aiAtLevel.toFixed(2)})`;
+      line += `   / mem.roof(AI=${aiAtLevel.toFixed(2)})`;
     }
 
     lines.push(line);
@@ -230,7 +235,9 @@ export function printRoofline(
     const time = p.medianTimeMs.toFixed(4).padStart(8);
     const gflops = p.achievedGFLOPS.toFixed(3).padStart(8);
     const ai = p.arithmeticIntensity.toFixed(2).padStart(8);
-    const effAI = p.memoryPlan.effectiveAI.toFixed(2);
+    // eff: label shows the same AI used in Efficiency = GFLOPS / (AI × peakBW),
+    // which is intrinsicAI (= arithmeticIntensity), matching the AI(F/B) column.
+    const effAI = p.arithmeticIntensity.toFixed(2);
     lines.push(`  │ ${name} │ ${time} │ ${gflops} │ ${ai} │ ${p.rooflineBar} │`);
     lines.push(`  │ ${''.padEnd(24)} │          │          │ eff:${effAI.padStart(4)} │                             │`);
   }

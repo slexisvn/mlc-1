@@ -123,6 +123,23 @@ class JSCodeGenerator {
       return;
     }
 
+    if (node.annotation === 'vectorize') {
+      // SIMD-width unrolled scalar code — emit W lanes per outer step.
+      // This represents vector parallelism: in hardware, these W scalar
+      // ops would map to a single SIMD instruction (e.g. vfmadd256_ps).
+      // V8 TurboFan can autovectorize this pattern.
+      const W = node.extent; // inner loop extent IS the SIMD width
+      this.emit(`// vectorize: ${W} SIMD lanes (${v} = 0..${W - 1})`);
+      for (let val = node.min; val < node.min + W; val++) {
+        this.emit(`{ const ${v} = ${val};`);
+        this.indent++;
+        this.genStmt(node.body);
+        this.indent--;
+        this.emit('}');
+      }
+      return;
+    }
+
     this.emit(`for (let ${v} = ${node.min}; ${v} < ${node.min + node.extent}; ${v}++) {${annotation}`);
     this.indent++;
     this.genStmt(node.body);

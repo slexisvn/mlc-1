@@ -165,7 +165,7 @@ export class RuntimeModule {
 
 // ─── Naive forward for verification ───
 
-export function naiveForward(
+function naiveForward(
   input: NDArray,
   params: NDArray[],
   activation: 'relu' | 'sigmoid' | 'tanh' | 'leaky_relu' | 'none' = 'relu'

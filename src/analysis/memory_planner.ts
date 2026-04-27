@@ -83,6 +83,15 @@ function countFLOPsInStmt(stmt: Stmt): number {
   return 0;
 }
 
+/**
+ * Public API: count total FLOPs in a PrimFunc using the correct recursive
+ * loop-aware traversal.  Used by cost_model.ts so both D6 and Phase 9
+ * roofline report the same FLOPs number.
+ */
+export function countKernelFlops(func: PrimFunc): number {
+  return countFLOPsInStmt(func.body);
+}
+
 // ═══════════════════════════════════════
 //  Memory Traffic Analysis
 // ═══════════════════════════════════════
@@ -161,19 +170,23 @@ function estimateWorkingSet(func: PrimFunc, schedInfo: ScheduleInfo): number {
 
   if (schedInfo.hasCacheRead && schedInfo.localBufBytes > 0) {
     // W_local[tileJ, K] is exactly the tile in cache
+    const tI = schedInfo.tileI;               // rows processed per i-tile (≥1)
+    const tJ = schedInfo.tileJ;
     const wParam = func.params.find(p => p.name === 'W');
     const K = wParam?.shape[1] ?? 1;
-    const aSliceBytes = 1 * K * 4;          // one input row: A[i, 0..K)
-    const outTileBytes = schedInfo.tileJ * 4; // partial output tile
+    const aSliceBytes = tI * K * 4;           // A rows resident: tileI × K
+    const outTileBytes = tI * tJ * 4;         // Out tile: tileI × tileJ outputs
     return schedInfo.localBufBytes + aSliceBytes + outTileBytes;
   }
 
   if (schedInfo.tiled) {
     const wParam = func.params.find(p => p.name === 'W');
     const K = wParam?.shape[1] ?? 1;
-    const wTileBytes  = schedInfo.tileJ * K * 4;
-    const aSliceBytes = K * 4;
-    const outTileBytes = schedInfo.tileJ * 4;
+    const tI = schedInfo.tileI;          // rows processed per i-tile
+    const tJ = schedInfo.tileJ;          // cols processed per j-tile
+    const wTileBytes  = tJ * K * 4;      // W slice: tileJ rows × K cols
+    const aSliceBytes = tI * K * 4;      // A slice: tileI rows × K cols (was always 1 row)
+    const outTileBytes = tI * tJ * 4;   // Out tile: tileI × tileJ outputs
     return wTileBytes + aSliceBytes + outTileBytes;
   }
 
@@ -201,6 +214,10 @@ export interface ScheduleInfo {
   tiled: boolean;
   /** tile size for j (the j_inner extent) */
   tileJ: number;
+  /** tile size for i (the i_inner extent), 1 if no i-split */
+  tileI: number;
+  /** tile size for k (the k_inner extent), 1 if no k-split */
+  tileK: number;
   /** a W_local or *_local buffer exists → cache_read applied */
   hasCacheRead: boolean;
   /** local buffer size in bytes */
@@ -224,6 +241,22 @@ function detectScheduleInfo(func: PrimFunc): ScheduleInfo {
   if (tiled) {
     const jInnerLoop = loops.find(l => l.loopVar.name === 'j_inner');
     if (jInnerLoop) tileJ = jInnerLoop.forNode.extent;
+  }
+
+  // i-tiling: i_outer + i_inner present
+  const tiledI = loopNames.includes('i_outer') && loopNames.includes('i_inner');
+  let tileI = 1;
+  if (tiledI) {
+    const iInnerLoop = loops.find(l => l.loopVar.name === 'i_inner');
+    if (iInnerLoop) tileI = iInnerLoop.forNode.extent;
+  }
+
+  // k-tiling: k_outer + k_inner present
+  const tiledK = loopNames.includes('k_outer') && loopNames.includes('k_inner');
+  let tileK = 1;
+  if (tiledK) {
+    const kInnerLoop = loops.find(l => l.loopVar.name === 'k_inner');
+    if (kInnerLoop) tileK = kInnerLoop.forNode.extent;
   }
 
   // j extent: use j_outer*tileJ when tiled, otherwise direct j loop extent
@@ -259,11 +292,13 @@ function detectScheduleInfo(func: PrimFunc): ScheduleInfo {
   const hasScalarPromotion = hasScalarNode(func.body);
 
   const applied: string[] = [];
-  if (tiled) applied.push(`tiling(j,${tileJ})`);
+  if (tiledI && tileI > 1) applied.push(`tiling(i,${tileI})`);
+  if (tiled && tileJ > 1) applied.push(`tiling(j,${tileJ})`);
+  if (tiledK && tileK > 1) applied.push(`tiling(k,${tileK})`);
   if (hasCacheRead) applied.push('cache_read');
   if (hasScalarPromotion) applied.push('scalar_promotion');
 
-  return { tiled, tileJ, hasCacheRead, localBufBytes, wReuseK, hasScalarPromotion, jExtent, applied };
+  return { tiled, tileJ, tileI, tileK, hasCacheRead, localBufBytes, wReuseK, hasScalarPromotion, jExtent, applied };
 }
 
 // ─── Effective memory traffic accounting for cache reuse ───
