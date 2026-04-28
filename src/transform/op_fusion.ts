@@ -49,11 +49,19 @@ function linearize(expr: Expr): { nodes: LinearNode[]; leafExprs: Map<number, Ex
   const leafExprs = new Map<number, Expr>();
   let nextId = 0;
   const exprToId = new Map<Expr, number>();
+  const varDefMap = new Map<string, number>();
 
   function visit(e: Expr): number {
     if (exprToId.has(e)) return exprToId.get(e)!;
 
     if (e.kind === 'var' || e.kind === 'constant') {
+      if (e.kind === 'var') {
+        const defId = varDefMap.get(e.name);
+        if (defId !== undefined) {
+          exprToId.set(e, defId);
+          return defId;
+        }
+      }
       const id = nextId++;
       exprToId.set(e, id);
       leafExprs.set(id, e);
@@ -61,7 +69,8 @@ function linearize(expr: Expr): { nodes: LinearNode[]; leafExprs: Map<number, Ex
     }
 
     if (e.kind === 'let') {
-      visit(e.value);
+      const valueId = visit(e.value);
+      varDefMap.set(e.varName.name, valueId);
       return visit(e.body);
     }
 
@@ -245,15 +254,6 @@ export function fuseOps(module: IRModule): IRModule {
       fusedBody,
       func.retType
     ));
-
-    // Print fusion summary
-    const fusedGroups = groups.filter(g => g.ops.length > 1);
-    if (fusedGroups.length > 0) {
-      console.log(`  Fusion applied in '${name}':`);
-      for (const g of fusedGroups) {
-        console.log(`    ${g.ops.join(' + ')} → ${g.fusedName}`);
-      }
-    }
   }
 
   return newModule;

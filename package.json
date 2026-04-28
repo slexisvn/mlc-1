@@ -4,7 +4,7 @@
   "description": "Mini MLC (Machine Learning Compilation) framework in TypeScript — educational",
   "type": "module",
   "scripts": {
-    "start": "npx tsx src/main.ts",
+    "start": "npx tsx src/playground.ts",
     "test": "vitest run",
     "build": "tsc"
   },

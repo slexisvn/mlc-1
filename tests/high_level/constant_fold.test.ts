@@ -110,3 +110,4 @@ test('unsupported constant op stays as CallExpr', () => {
   expect(folded.kind).toBe('call');
 });
 
+

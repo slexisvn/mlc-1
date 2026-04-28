@@ -63,3 +63,4 @@ test('measureQuantQuality reports cosine and diff statistics', () => {
   expect(Number(quality.meanAbsDiff.toFixed(3))).toBe(0.133);
 });
 
+

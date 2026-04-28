@@ -25,10 +25,19 @@
 //    β₁ = 0.9, β₂ = 0.999, ε = 1e-8
 // ═══════════════════════════════════════════════════════════════
 
-import { GradTensor } from '../autograd/engine.js';
+import { Tensor } from '../tensor/tensor.js';
+import { Optimizer } from './types.js';
 
-export class Adam {
-  private params: GradTensor[];
+export interface AdamOptions {
+  lr?: number;
+  beta1?: number;
+  beta2?: number;
+  eps?: number;
+}
+
+export class Adam implements Optimizer {
+  readonly type = 'adam' as const;
+  readonly params: Tensor[];
   private lr: number;
   private beta1: number;
   private beta2: number;
@@ -41,22 +50,31 @@ export class Adam {
   private v: Float32Array[];
 
   constructor(
-    params: GradTensor[],
-    lr = 0.001,
-    beta1 = 0.9,
-    beta2 = 0.999,
-    eps = 1e-8
+    params: Tensor[],
+    opts: number | AdamOptions = 0.001,
+    legacyBeta1 = 0.9,
+    legacyBeta2 = 0.999,
+    legacyEps = 1e-8
   ) {
+    const normalized = typeof opts === 'number'
+      ? { lr: opts, beta1: legacyBeta1, beta2: legacyBeta2, eps: legacyEps }
+      : {
+          lr: opts.lr ?? 0.001,
+          beta1: opts.beta1 ?? 0.9,
+          beta2: opts.beta2 ?? 0.999,
+          eps: opts.eps ?? 1e-8,
+        };
+
     this.params = params;
-    this.lr = lr;
-    this.beta1 = beta1;
-    this.beta2 = beta2;
-    this.eps = eps;
+    this.lr = normalized.lr;
+    this.beta1 = normalized.beta1;
+    this.beta2 = normalized.beta2;
+    this.eps = normalized.eps;
     this.step_t = 0;
 
     // Initialize moment buffers to zeros — same shape as each parameter
-    this.m = params.map(p => new Float32Array(p.data.size));
-    this.v = params.map(p => new Float32Array(p.data.size));
+    this.m = params.map(p => new Float32Array(p.size));
+    this.v = params.map(p => new Float32Array(p.size));
   }
 
   step(): void {
@@ -76,7 +94,7 @@ export class Adam {
       const g = param.grad.data;   // gradient vector
       const m = this.m[i];         // 1st moment buffer
       const v = this.v[i];         // 2nd moment buffer
-      const w = param.data.data;   // weight vector
+      const w = param.data;   // weight vector
 
       for (let j = 0; j < w.length; j++) {
         const gj = g[j];

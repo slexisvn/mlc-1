@@ -51,6 +51,15 @@ import {
   type Stmt, type ValueExpr, type IndexExpr
 } from '../ir/low_level.js';
 
+export type WATKernelMode = 'scalar' | 'simd-f32x4';
+
+export interface WATKernelInfo {
+  name: string;
+  mode: WATKernelMode;
+  weightLayout: 'row-major' | 'packed-j4k';
+  note: string;
+}
+
 export interface WATModule {
   /** Full WAT text (can be passed to wat2wasm) */
   text: string;
@@ -60,6 +69,8 @@ export interface WATModule {
   totalBytes: number;
   /** Names of exported functions */
   exports: string[];
+  /** Kernel-level codegen strategy */
+  kernels: WATKernelInfo[];
 }
 
 // ─── Main entry point ─────────────────────────────────────────
@@ -77,6 +88,7 @@ export interface WATModule {
  */
 export function codegenWAT(funcs: PrimFunc[]): WATModule {
   const exports: string[] = funcs.map(f => f.name);
+  const kernels = funcs.map(analyzeWATKernel);
 
   // Build global buffer offset map across all functions
   // Each func uses its own set of params, but we lay them out
@@ -101,7 +113,10 @@ export function codegenWAT(funcs: PrimFunc[]): WATModule {
   lines.push('');
 
   for (const func of funcs) {
-    const gen = new WATFuncGenerator(func, bufferOffsets);
+    const kernelInfo = kernels.find(k => k.name === func.name)!;
+    const gen = kernelInfo.mode === 'simd-f32x4'
+      ? new WATSimdDenseGenerator(func, bufferOffsets, kernelInfo)
+      : new WATFuncGenerator(func, bufferOffsets);
     lines.push(gen.generate());
     lines.push('');
   }
@@ -113,7 +128,66 @@ export function codegenWAT(funcs: PrimFunc[]): WATModule {
     bufferOffsets,
     totalBytes,
     exports,
+    kernels,
   };
+}
+
+export function analyzeWATKernel(func: PrimFunc): WATKernelInfo {
+  const variant = getDenseKernelVariant(func.name);
+  const a = func.params.find(p => p.name === 'A');
+  const w = func.params.find(p => p.name === 'W');
+  const b = func.params.find(p => p.name === 'B');
+  const out = func.params.find(p => p.name === 'Out');
+
+  if (!variant || !a || !w || !b || !out) {
+    return {
+      name: func.name,
+      mode: 'scalar',
+      weightLayout: 'row-major',
+      note: 'generic scalar WAT fallback',
+    };
+  }
+
+  const [m, k] = a.shape;
+  const [n, wk] = w.shape;
+  const simdEligible = a.shape.length === 2
+    && w.shape.length === 2
+    && b.shape.length === 2
+    && out.shape.length === 2
+    && b.shape[0] === 1
+    && b.shape[1] === n
+    && out.shape[0] === m
+    && out.shape[1] === n
+    && wk === k
+    && n % 4 === 0;
+
+  if (!simdEligible) {
+    return {
+      name: func.name,
+      mode: 'scalar',
+      weightLayout: 'row-major',
+      note: 'scalar fallback (requires canonical dense+bias(+relu) with output width divisible by 4)',
+    };
+  }
+
+  return {
+    name: func.name,
+    mode: 'simd-f32x4',
+    weightLayout: 'packed-j4k',
+    note: variant === 'fused_dense_bias_relu'
+      ? 'SIMD dense+bias+relu with f32x4 lanes'
+      : 'SIMD dense+bias with f32x4 lanes',
+  };
+}
+
+function getDenseKernelVariant(name: string): 'fused_dense_bias' | 'fused_dense_bias_relu' | null {
+  if (name === 'fused_dense_bias_relu' || name.startsWith('fused_dense_bias_relu_')) {
+    return 'fused_dense_bias_relu';
+  }
+  if (name === 'fused_dense_bias' || name.startsWith('fused_dense_bias_')) {
+    return 'fused_dense_bias';
+  }
+  return null;
 }
 
 // ─── Per-function WAT generator ───────────────────────────────
@@ -407,6 +481,187 @@ class WATFuncGenerator {
       // Fallback: emit a 0 constant with a comment
       this.emit(`f32.const 0.0 ;; unsupported expr type`);
     }
+  }
+}
+
+class WATSimdDenseGenerator {
+  private lines: string[] = [];
+  private indent = 2;
+
+  constructor(
+    private func: PrimFunc,
+    private bufferOffsets: Map<string, number>,
+    private kernelInfo: WATKernelInfo,
+  ) {}
+
+  generate(): string {
+    const a = this.mustFindParam('A');
+    const w = this.mustFindParam('W');
+    const b = this.mustFindParam('B');
+    const out = this.mustFindParam('Out');
+
+    const M = a.shape[0];
+    const K = a.shape[1];
+    const N = out.shape[1];
+    const vecLimit = N - (N % 4);
+    const withRelu = getDenseKernelVariant(this.func.name) === 'fused_dense_bias_relu';
+
+    this.lines = [];
+    this.emit(`  ;; ─── ${this.func.name} (${this.kernelInfo.mode}) ───`);
+    this.emit(`  ;; Inputs: A[${a.shape.join(',')}], W_packed[${w.shape.join(',')}], B[${b.shape.join(',')}], Out[${out.shape.join(',')}]`);
+    this.emit(`  (func $${this.func.name} (export "${this.func.name}") (param $A i32) (param $W i32) (param $B i32) (param $Out i32)`);
+    this.indent = 4;
+    [
+      '(local $i i32)',
+      '(local $j i32)',
+      '(local $k i32)',
+      '(local $acc v128)',
+      '(local $avec v128)',
+      '(local $wvec v128)',
+    ].forEach(line => this.emit(line));
+    this.emit('');
+
+    this.emit('i32.const 0');
+    this.emit('local.set $i');
+    this.emit('block $i_exit');
+    this.indent += 2;
+    this.emit('loop $i_loop');
+    this.indent += 2;
+    this.emit('local.get $i');
+    this.emit(`i32.const ${M}`);
+    this.emit('i32.ge_s');
+    this.emit('br_if $i_exit');
+
+    this.emit('i32.const 0');
+    this.emit('local.set $j');
+    this.emit('block $j_exit');
+    this.indent += 2;
+    this.emit('loop $j_loop');
+    this.indent += 2;
+    this.emit('local.get $j');
+    this.emit(`i32.const ${vecLimit}`);
+    this.emit('i32.ge_s');
+    this.emit('br_if $j_exit');
+
+    this.emit('v128.const f32x4 0 0 0 0');
+    this.emit('local.set $acc');
+    this.emit('i32.const 0');
+    this.emit('local.set $k');
+    this.emit('block $k_exit');
+    this.indent += 2;
+    this.emit('loop $k_loop');
+    this.indent += 2;
+    this.emit('local.get $k');
+    this.emit(`i32.const ${K}`);
+    this.emit('i32.ge_s');
+    this.emit('br_if $k_exit');
+
+    this.emit('local.get $A');
+    this.emit('local.get $i');
+    this.emit(`i32.const ${K}`);
+    this.emit('i32.mul');
+    this.emit('local.get $k');
+    this.emit('i32.add');
+    this.emit('i32.const 4');
+    this.emit('i32.mul');
+    this.emit('i32.add');
+    this.emit('f32.load');
+    this.emit('f32x4.splat');
+    this.emit('local.set $avec');
+
+    this.emit('local.get $W');
+    this.emit('local.get $j');
+    this.emit('i32.const 2');
+    this.emit('i32.shr_u');
+    this.emit(`i32.const ${K}`);
+    this.emit('i32.mul');
+    this.emit('local.get $k');
+    this.emit('i32.add');
+    this.emit('i32.const 16');
+    this.emit('i32.mul');
+    this.emit('i32.add');
+    this.emit('v128.load');
+    this.emit('local.set $wvec');
+
+    this.emit('local.get $acc');
+    this.emit('local.get $avec');
+    this.emit('local.get $wvec');
+    this.emit('f32x4.mul');
+    this.emit('f32x4.add');
+    this.emit('local.set $acc');
+
+    this.emit('local.get $k');
+    this.emit('i32.const 1');
+    this.emit('i32.add');
+    this.emit('local.set $k');
+    this.emit('br $k_loop');
+    this.indent -= 2;
+    this.emit('end ;; loop $k_loop');
+    this.indent -= 2;
+    this.emit('end ;; block $k_exit');
+
+    this.emit('local.get $acc');
+    this.emit('local.get $B');
+    this.emit('local.get $j');
+    this.emit('i32.const 4');
+    this.emit('i32.mul');
+    this.emit('i32.add');
+    this.emit('v128.load');
+    this.emit('f32x4.add');
+    if (withRelu) {
+      this.emit('v128.const f32x4 0 0 0 0');
+      this.emit('f32x4.max');
+    }
+    this.emit('local.set $acc');
+
+    this.emit('local.get $Out');
+    this.emit('local.get $i');
+    this.emit(`i32.const ${N}`);
+    this.emit('i32.mul');
+    this.emit('local.get $j');
+    this.emit('i32.add');
+    this.emit('i32.const 4');
+    this.emit('i32.mul');
+    this.emit('i32.add');
+    this.emit('local.get $acc');
+    this.emit('v128.store');
+
+    this.emit('local.get $j');
+    this.emit('i32.const 4');
+    this.emit('i32.add');
+    this.emit('local.set $j');
+    this.emit('br $j_loop');
+    this.indent -= 2;
+    this.emit('end ;; loop $j_loop');
+    this.indent -= 2;
+    this.emit('end ;; block $j_exit');
+
+    this.emit('local.get $i');
+    this.emit('i32.const 1');
+    this.emit('i32.add');
+    this.emit('local.set $i');
+    this.emit('br $i_loop');
+    this.indent -= 2;
+    this.emit('end ;; loop $i_loop');
+    this.indent -= 2;
+    this.emit('end ;; block $i_exit');
+
+    this.indent = 2;
+    this.emit('  )');
+
+    return this.lines.join('\n');
+  }
+
+  private mustFindParam(name: string) {
+    const param = this.func.params.find(p => p.name === name);
+    if (!param) {
+      throw new Error(`Expected ${name} param in ${this.func.name}`);
+    }
+    return param;
+  }
+
+  private emit(line: string): void {
+    this.lines.push(' '.repeat(this.indent) + line);
   }
 }
 

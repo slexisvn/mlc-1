@@ -131,3 +131,4 @@ export function cseModule(module: IRModule): { module: IRModule; stats: CSEStats
     stats: { checked: totalChecked, replaced: totalReplaced, bindings: totalBindings },
   };
 }
+

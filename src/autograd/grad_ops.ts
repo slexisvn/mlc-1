@@ -1,414 +1,225 @@
-// ═══════════════════════════════════════════════════════════════
-//  Gradient Operations — Forward + Backward for each op
-//  Each function performs the forward computation and records
-//  the backward function into the autograd tape.
-// ═══════════════════════════════════════════════════════════════
+import { Tensor } from '../tensor/tensor.js';
+import { engine } from './engine.js';
 
-import { NDArray } from '../tensor/ndarray.js';
-import { GradTensor, engine } from './engine.js';
-
-// ─── DENSE ───
-// Forward: C = A @ B^T          A:[M,K] B:[N,K] → C:[M,N]
-export function denseOp(X: GradTensor, W: GradTensor): GradTensor {
-  const result = new GradTensor(X.data.matmul(W.data.transpose()), X.requiresGrad || W.requiresGrad);
-  engine.record('nn.dense', [X, W], result, [X.data, W.data],
-    (gradOut, [savedX, savedW]) => {
-      const dX = gradOut.matmul(savedW); // [M,N] @ [N,K] = [M,K]
-      const dW = gradOut.transpose().matmul(savedX); // [N,M] @ [M,K] = [N,K]
-      return [dX, dW];
-    }
-  );
+export function denseOp(x: Tensor, w: Tensor): Tensor {
+  const result = x.matmul(w.transpose()).withGrad(x.requiresGrad || w.requiresGrad);
+  engine.record('nn.dense', [x, w], result, [x, w], (gradOut, [savedX, savedW]) => {
+    const dX = gradOut.matmul(savedW);
+    const dW = gradOut.transpose().matmul(savedX);
+    return [dX, dW];
+  });
   return result;
 }
 
-// ─── MATMUL ───
-// Forward: C = A @ B            A:[M,K] B:[K,N] → C:[M,N]
-// Backward: dA = dC @ B^T       dB = A^T @ dC
-export function matmulOp(A: GradTensor, B: GradTensor): GradTensor {
-  const result = new GradTensor(A.data.matmul(B.data), true);
-  engine.record('matmul', [A, B], result, [A.data, B.data],
-    (gradOut, [savedA, savedB]) => {
-      const dA = gradOut.matmul(savedB.transpose());
-      const dB = savedA.transpose().matmul(gradOut);
-      return [dA, dB];
-    }
-  );
+export function matmulOp(a: Tensor, b: Tensor): Tensor {
+  const result = a.matmul(b).withGrad(a.requiresGrad || b.requiresGrad);
+  engine.record('matmul', [a, b], result, [a, b], (gradOut, [savedA, savedB]) => {
+    const dA = gradOut.matmul(savedB.transpose());
+    const dB = savedA.transpose().matmul(gradOut);
+    return [dA, dB];
+  });
   return result;
 }
 
-// ─── BIAS ADD ───
-// Forward: Y = X + bias         X:[M,N] bias:[N] → Y:[M,N]
-// Backward: dX = dY             dbias = sum(dY, axis=0)
-export function biasAddOp(X: GradTensor, bias: GradTensor): GradTensor {
-  const result = new GradTensor(X.data.add(bias.data), true);
-  engine.record('bias_add', [X, bias], result, [],
-    (gradOut) => {
-      const dX = gradOut;
-      const dBias = gradOut.sum(0);
-      return [dX, dBias];
-    }
-  );
+export function biasAddOp(x: Tensor, bias: Tensor): Tensor {
+  const result = x.add(bias).withGrad(x.requiresGrad || bias.requiresGrad);
+  engine.record('bias_add', [x, bias], result, [], gradOut => [gradOut, gradOut.sum(0)]);
   return result;
 }
 
-// ─── RELU ───
-// Forward: Y = max(X, 0)
-// Backward: dX = dY * (X > 0)
-export function reluOp(X: GradTensor): GradTensor {
-  const outData = NDArray.zeros(X.data.shape);
-  for (let i = 0; i < X.data.size; i++) {
-    outData.data[i] = Math.max(X.data.data[i], 0);
+export function reluOp(x: Tensor): Tensor {
+  const out = x.isMeta ? Tensor.meta(x.shape, x.requiresGrad) : Tensor.zeros(x.shape, true);
+  if (!x.isMeta) {
+    for (let i = 0; i < x.size; i++) out.data[i] = Math.max(x.data[i], 0);
   }
-  const result = new GradTensor(outData, true);
-  engine.record('relu', [X], result, [X.data],
-    (gradOut, [savedX]) => {
-      const mask = savedX.gt(0);
-      return [gradOut.mul(mask)];
-    }
-  );
-  return result;
+  engine.record('relu', [x], out, [x], (gradOut, [savedX]) => [gradOut.mul(savedX.gt(0))]);
+  return out;
 }
 
-// ─── SIGMOID ───
-// Forward: Y = 1 / (1 + exp(-X))
-// Backward: dX = dY * Y * (1 - Y)
-export function sigmoidOp(X: GradTensor): GradTensor {
-  const outData = NDArray.zeros(X.data.shape);
-  for (let i = 0; i < X.data.size; i++) {
-    const ex = Math.exp(-X.data.data[i]);
-    outData.data[i] = 1 / (1 + ex);
+export function sigmoidOp(x: Tensor): Tensor {
+  const out = x.isMeta ? Tensor.meta(x.shape, x.requiresGrad) : Tensor.zeros(x.shape, true);
+  if (!x.isMeta) {
+    for (let i = 0; i < x.size; i++) out.data[i] = 1 / (1 + Math.exp(-x.data[i]));
   }
-  const result = new GradTensor(outData, true);
-  engine.record('sigmoid', [X], result, [outData],
-    (gradOut, [savedY]) => {
-      // dX = dY * Y * (1 - Y)
-      const oneMinusY = NDArray.ones(savedY.shape).sub(savedY);
-      return [gradOut.mul(savedY.mul(oneMinusY))];
-    }
-  );
-  return result;
+  engine.record('sigmoid', [x], out, [out], (gradOut, [savedY]) => {
+    const oneMinusY = Tensor.ones(savedY.shape).sub(savedY);
+    return [gradOut.mul(savedY.mul(oneMinusY))];
+  });
+  return out;
 }
 
-// ─── TANH ───
-// Forward: Y = tanh(X)
-// Backward: dX = dY * (1 - Y²)
-export function tanhOp(X: GradTensor): GradTensor {
-  const outData = NDArray.zeros(X.data.shape);
-  for (let i = 0; i < X.data.size; i++) {
-    outData.data[i] = Math.tanh(X.data.data[i]);
+export function tanhOp(x: Tensor): Tensor {
+  const out = x.isMeta ? Tensor.meta(x.shape, x.requiresGrad) : Tensor.zeros(x.shape, true);
+  if (!x.isMeta) {
+    for (let i = 0; i < x.size; i++) out.data[i] = Math.tanh(x.data[i]);
   }
-  const result = new GradTensor(outData, true);
-  engine.record('tanh', [X], result, [outData],
-    (gradOut, [savedY]) => {
-      // dX = dY * (1 - Y²)
-      const ySquared = savedY.mul(savedY);
-      const factor = NDArray.ones(savedY.shape).sub(ySquared);
-      return [gradOut.mul(factor)];
-    }
-  );
-  return result;
+  engine.record('tanh', [x], out, [out], (gradOut, [savedY]) => {
+    const factor = Tensor.ones(savedY.shape).sub(savedY.mul(savedY));
+    return [gradOut.mul(factor)];
+  });
+  return out;
 }
 
-// ─── LEAKY RELU ───
-// Forward: Y = X if X > 0, else alpha * X
-// Backward: dX = dY if X > 0, else alpha * dY
-export function leakyReluOp(X: GradTensor, alpha = 0.01): GradTensor {
-  const outData = NDArray.zeros(X.data.shape);
-  for (let i = 0; i < X.data.size; i++) {
-    outData.data[i] = X.data.data[i] > 0 ? X.data.data[i] : alpha * X.data.data[i];
+export function leakyReluOp(x: Tensor, alpha = 0.01): Tensor {
+  const out = x.isMeta ? Tensor.meta(x.shape, x.requiresGrad) : Tensor.zeros(x.shape, true);
+  if (!x.isMeta) {
+    for (let i = 0; i < x.size; i++) out.data[i] = x.data[i] > 0 ? x.data[i] : alpha * x.data[i];
   }
-  const result = new GradTensor(outData, true);
-  engine.record('leaky_relu', [X], result, [X.data],
-    (gradOut, [savedX]) => {
-      const gradInput = NDArray.zeros(savedX.shape);
-      for (let i = 0; i < savedX.size; i++) {
-        gradInput.data[i] = savedX.data[i] > 0 ? gradOut.data[i] : alpha * gradOut.data[i];
-      }
-      return [gradInput];
+  engine.record('leaky_relu', [x], out, [x], (gradOut, [savedX]) => {
+    if (savedX.isMeta) return [Tensor.meta(savedX.shape)];
+    const gradInput = Tensor.zeros(savedX.shape);
+    for (let i = 0; i < savedX.size; i++) gradInput.data[i] = savedX.data[i] > 0 ? gradOut.data[i] : alpha * gradOut.data[i];
+    return [gradInput];
+  });
+  return out;
+}
+
+export function softmaxOp(x: Tensor, axis = -1): Tensor {
+  const a = axis < 0 ? x.ndim + axis : axis;
+  if (x.isMeta) {
+    const out = Tensor.meta(x.shape, x.requiresGrad);
+    engine.record('softmax', [x], out, [out], gradOut => [Tensor.meta(gradOut.shape)]);
+    return out;
+  }
+  const maxVals = x.max(a, true);
+  const exps = x.sub(maxVals).exp();
+  const out = exps.div(exps.sum(a, true)).withGrad(true);
+  engine.record('softmax', [x], out, [out], (gradOut, [savedY]) => {
+    const dot = gradOut.mul(savedY).sum(a, true);
+    return [savedY.mul(gradOut.sub(dot))];
+  });
+  return out;
+}
+
+export function logOp(x: Tensor): Tensor {
+  const result = x.log().withGrad(x.requiresGrad);
+  engine.record('log', [x], result, [x], (gradOut, [savedX]) => [gradOut.div(savedX)]);
+  return result;
+}
+
+export function expOp(x: Tensor): Tensor {
+  const out = x.exp().withGrad(x.requiresGrad);
+  engine.record('exp', [x], out, [out], (gradOut, [savedY]) => [gradOut.mul(savedY)]);
+  return out;
+}
+
+export function sumOp(x: Tensor, axis?: number): Tensor {
+  const result = x.sum(axis).withGrad(x.requiresGrad);
+  const inputShape = [...x.shape];
+  engine.record('sum', [x], result, [], gradOut => {
+    if (x.isMeta) return [Tensor.meta(inputShape)];
+    let expanded = gradOut;
+    if (axis !== undefined) {
+      const expandedShape = [...inputShape];
+      expandedShape[axis < 0 ? inputShape.length + axis : axis] = 1;
+      expanded = gradOut.reshape(expandedShape);
     }
-  );
+    const grad = Tensor.zeros(inputShape);
+    for (let i = 0; i < grad.size; i++) grad.data[i] = expanded.data[i % expanded.size];
+    return [grad];
+  });
   return result;
 }
 
-// ─── SOFTMAX ───
-// Forward: Y[i] = exp(X[i] - max(X)) / sum(exp(X - max(X)))
-// Backward: dX[i] = Y[i] * (dY[i] - sum(dY * Y))
-export function softmaxOp(X: GradTensor, axis = -1): GradTensor {
-  const a = axis < 0 ? X.data.ndim + axis : axis;
-  // Numerically stable softmax
-  const maxVals = X.data.max(a, true);
-  const shifted = X.data.sub(maxVals);
-  const exps = shifted.exp();
-  const sumExps = exps.sum(a, true);
-  const outData = exps.div(sumExps);
-
-  const result = new GradTensor(outData, true);
-  engine.record('softmax', [X], result, [outData],
-    (gradOut, [savedY]) => {
-      // dX[i] = Y[i] * (dY[i] - sum(dY * Y, axis))
-      const dotProduct = gradOut.mul(savedY).sum(a, true);
-      return [savedY.mul(gradOut.sub(dotProduct))];
+export function meanOp(x: Tensor, axis?: number): Tensor {
+  const n = axis !== undefined ? x.shape[axis < 0 ? x.ndim + axis : axis] : x.size;
+  const result = x.mean(axis).withGrad(x.requiresGrad);
+  const inputShape = [...x.shape];
+  engine.record('mean', [x], result, [], gradOut => {
+    if (x.isMeta) return [Tensor.meta(inputShape)];
+    let expanded = gradOut;
+    if (axis !== undefined) {
+      const expandedShape = [...inputShape];
+      expandedShape[axis < 0 ? inputShape.length + axis : axis] = 1;
+      expanded = gradOut.reshape(expandedShape);
     }
-  );
+    const grad = Tensor.zeros(inputShape);
+    for (let i = 0; i < grad.size; i++) grad.data[i] = expanded.data[i % expanded.size] / n;
+    return [grad];
+  });
   return result;
 }
 
-// ─── LOG ───
-// Forward: Y = log(X)
-// Backward: dX = dY / X
-export function logOp(X: GradTensor): GradTensor {
-  const result = new GradTensor(X.data.log(), true);
-  engine.record('log', [X], result, [X.data],
-    (gradOut, [savedX]) => [gradOut.div(savedX)]
-  );
+export function mulOp(a: Tensor, b: Tensor): Tensor {
+  const result = a.mul(b).withGrad(a.requiresGrad || b.requiresGrad);
+  engine.record('multiply', [a, b], result, [a, b], (gradOut, [savedA, savedB]) => [gradOut.mul(savedB), gradOut.mul(savedA)]);
   return result;
 }
 
-// ─── EXP ───
-// Forward: Y = exp(X)
-// Backward: dX = dY * Y
-export function expOp(X: GradTensor): GradTensor {
-  const outData = X.data.exp();
-  const result = new GradTensor(outData, true);
-  engine.record('exp', [X], result, [outData],
-    (gradOut, [savedY]) => [gradOut.mul(savedY)]
-  );
+export function addOp(a: Tensor, b: Tensor): Tensor {
+  const result = a.add(b).withGrad(a.requiresGrad || b.requiresGrad);
+  engine.record('add', [a, b], result, [], gradOut => [gradOut.clone(), gradOut.clone()]);
   return result;
 }
 
-// ─── SUM ───
-// Forward: Y = sum(X, axis)
-// Backward: dX = broadcast(dY, X.shape)
-export function sumOp(X: GradTensor, axis?: number): GradTensor {
-  const result = new GradTensor(X.data.sum(axis), true);
-  const inputShape = [...X.data.shape];
-  engine.record('sum', [X], result, [],
-    (gradOut) => {
-      // Broadcast grad back to input shape
-      let expanded = gradOut;
-      if (axis !== undefined) {
-        const expandedShape = [...inputShape];
-        expandedShape[axis < 0 ? inputShape.length + axis : axis] = 1;
-        expanded = gradOut.reshape(expandedShape);
-      }
-      // Broadcast to full input shape
-      const result = NDArray.zeros(inputShape);
-      for (let i = 0; i < result.size; i++) {
-        result.data[i] = expanded.data[i % expanded.size];
-      }
-      return [result];
-    }
-  );
+export function subOp(a: Tensor, b: Tensor): Tensor {
+  const result = a.sub(b).withGrad(a.requiresGrad || b.requiresGrad);
+  engine.record('subtract', [a, b], result, [], gradOut => [gradOut.clone(), gradOut.neg()]);
   return result;
 }
 
-// ─── MEAN ───
-export function meanOp(X: GradTensor, axis?: number): GradTensor {
-  const n = axis !== undefined
-    ? X.data.shape[axis < 0 ? X.data.ndim + axis : axis]
-    : X.data.size;
-  const result = new GradTensor(X.data.mean(axis), true);
-  const inputShape = [...X.data.shape];
-  engine.record('mean', [X], result, [],
-    (gradOut) => {
-      let expanded = gradOut;
-      if (axis !== undefined) {
-        const expandedShape = [...inputShape];
-        expandedShape[axis < 0 ? inputShape.length + axis : axis] = 1;
-        expanded = gradOut.reshape(expandedShape);
-      }
-      const grad = NDArray.zeros(inputShape);
-      for (let i = 0; i < grad.size; i++) {
-        grad.data[i] = expanded.data[i % expanded.size] / n;
-      }
-      return [grad];
-    }
-  );
+export function negOp(a: Tensor): Tensor {
+  const result = a.neg().withGrad(a.requiresGrad);
+  engine.record('neg', [a], result, [], gradOut => [gradOut.neg()]);
   return result;
 }
 
-// ─── MULTIPLY (element-wise) ───
-// Forward: Y = A * B
-// Backward: dA = dY * B,  dB = dY * A
-export function mulOp(A: GradTensor, B: GradTensor): GradTensor {
-  const result = new GradTensor(A.data.mul(B.data), true);
-  engine.record('multiply', [A, B], result, [A.data, B.data],
-    (gradOut, [savedA, savedB]) => [gradOut.mul(savedB), gradOut.mul(savedA)]
-  );
-  return result;
-}
+export function batchNormOp(x: Tensor, gamma: Tensor, beta: Tensor, eps = 1e-5): Tensor {
+  const [b, c] = x.shape;
+  if (x.isMeta || gamma.isMeta || beta.isMeta) {
+    const out = Tensor.meta([b, c], x.requiresGrad || gamma.requiresGrad || beta.requiresGrad);
+    engine.record('batch_norm', [x, gamma, beta], out, [x, gamma, beta], () => [
+      Tensor.meta([b, c]),
+      Tensor.meta([1, c]),
+      Tensor.meta([1, c]),
+    ]);
+    return out;
+  }
 
-// ─── ADD ───
-export function addOp(A: GradTensor, B: GradTensor): GradTensor {
-  const result = new GradTensor(A.data.add(B.data), true);
-  engine.record('add', [A, B], result, [],
-    (gradOut) => [gradOut.clone(), gradOut.clone()]
-  );
-  return result;
-}
-
-// ─── SUBTRACT ───
-export function subOp(A: GradTensor, B: GradTensor): GradTensor {
-  const result = new GradTensor(A.data.sub(B.data), true);
-  engine.record('subtract', [A, B], result, [],
-    (gradOut) => [gradOut.clone(), gradOut.neg()]
-  );
-  return result;
-}
-
-// ─── NEG ───
-export function negOp(A: GradTensor): GradTensor {
-  const result = new GradTensor(A.data.neg(), true);
-  engine.record('neg', [A], result, [],
-    (gradOut) => [gradOut.neg()]
-  );
-  return result;
-}
-
-// ─── BATCH NORM ────────────────────────────────────────────────
-// What it does (MLC concept):
-//   Normalize a mini-batch of activations to zero mean and unit variance,
-//   then scale/shift with learnable parameters γ (scale) and β (shift).
-//
-//   Training forward:
-//     μ = mean(x, axis=0)             [1, C]  per-feature mean
-//     σ² = var(x, axis=0)             [1, C]  per-feature variance
-//     x̂ = (x - μ) / sqrt(σ² + ε)    [B, C]  normalized
-//     y  = γ * x̂ + β                 [B, C]  rescaled
-//
-//   Backward (through normalization + scale/shift):
-//     dγ = sum(dY * x̂, axis=0)
-//     dβ = sum(dY, axis=0)
-//     dx̂ = dY * γ
-//     dvar = sum(dx̂ * (x - μ) * -0.5 * (σ² + ε)^(-3/2), axis=0)
-//     dmean = sum(dx̂ * -1/sqrt(σ²+ε), axis=0) + dvar * mean(-2(x-μ), axis=0)
-//     dx = dx̂ / sqrt(σ²+ε) + dvar * 2(x-μ)/N + dmean/N
-//
-//   Why it matters:
-//     - Stabilizes and accelerates training (reduces covariate shift)
-//     - Enables much higher learning rates
-//     - Each call is a "batch_norm" node in the IR; shape-preserving
-//
-// Inputs:
-//   x    : [B, C]  — input activations
-//   gamma: [1, C]  — learnable scale
-//   beta : [1, C]  — learnable shift
-//   eps  : scalar  — numerical stability (default 1e-5)
-// ──────────────────────────────────────────────────────────────
-export function batchNormOp(
-  x: GradTensor,
-  gamma: GradTensor,
-  beta: GradTensor,
-  eps = 1e-5
-): GradTensor {
-  const [B, C] = x.data.shape;
-
-  // Compute per-feature mean and variance
-  const mean = new Float32Array(C);
-  const variance = new Float32Array(C);
-
-  for (let c = 0; c < C; c++) {
+  const mean = new Float32Array(c);
+  const variance = new Float32Array(c);
+  for (let col = 0; col < c; col++) {
     let sum = 0;
-    for (let b = 0; b < B; b++) sum += x.data.data[b * C + c];
-    mean[c] = sum / B;
+    for (let row = 0; row < b; row++) sum += x.data[row * c + col];
+    mean[col] = sum / b;
   }
-  for (let c = 0; c < C; c++) {
+  for (let col = 0; col < c; col++) {
     let sq = 0;
-    for (let b = 0; b < B; b++) {
-      const diff = x.data.data[b * C + c] - mean[c];
+    for (let row = 0; row < b; row++) {
+      const diff = x.data[row * c + col] - mean[col];
       sq += diff * diff;
     }
-    variance[c] = sq / B;
+    variance[col] = sq / b;
   }
-
-  // x̂ = (x - μ) / sqrt(σ² + ε)
-  const xHatData = new Float32Array(B * C);
-  const stdInv = new Float32Array(C);
-  for (let c = 0; c < C; c++) stdInv[c] = 1 / Math.sqrt(variance[c] + eps);
-
-  for (let b = 0; b < B; b++) {
-    for (let c = 0; c < C; c++) {
-      xHatData[b * C + c] = (x.data.data[b * C + c] - mean[c]) * stdInv[c];
+  const xHat = new Float32Array(b * c);
+  const stdInv = new Float32Array(c);
+  for (let col = 0; col < c; col++) stdInv[col] = 1 / Math.sqrt(variance[col] + eps);
+  for (let row = 0; row < b; row++) {
+    for (let col = 0; col < c; col++) {
+      xHat[row * c + col] = (x.data[row * c + col] - mean[col]) * stdInv[col];
     }
   }
-
-  // y = γ * x̂ + β
-  const yData = new Float32Array(B * C);
-  for (let b = 0; b < B; b++) {
-    for (let c = 0; c < C; c++) {
-      const idx = b * C + c;
-      yData[idx] = gamma.data.data[c] * xHatData[idx] + beta.data.data[c];
+  const out = Tensor.zeros([b, c], true);
+  for (let row = 0; row < b; row++) {
+    for (let col = 0; col < c; col++) {
+      const idx = row * c + col;
+      out.data[idx] = gamma.data[col] * xHat[idx] + beta.data[col];
     }
   }
-
-  const result = new GradTensor(new NDArray(yData, [B, C]), true);
-
-  // Save intermediates for backward
-  const savedX = x.data;
-  const savedGamma = gamma.data;
-  const savedXHat = new NDArray(new Float32Array(xHatData), [B, C]);
-  const savedStdInv = new Float32Array(stdInv);
-  const savedMean = new Float32Array(mean);
-
-  engine.record('batch_norm', [x, gamma, beta], result,
-    [savedX, savedGamma, savedXHat],
-    (dY, [_sx, _sg, xHat]) => {
-      const dYd = dY.data;
-
-      // dγ = sum(dY * x̂, axis=0): [1, C]
-      const dGamma = new Float32Array(C);
-      // dβ = sum(dY, axis=0): [1, C]
-      const dBeta = new Float32Array(C);
-      // dx̂ = dY * γ
-      const dXhat = new Float32Array(B * C);
-
-      for (let c = 0; c < C; c++) {
-        for (let b = 0; b < B; b++) {
-          const idx = b * C + c;
-          dGamma[c] += dYd[idx] * xHat.data[idx];
-          dBeta[c] += dYd[idx];
-          dXhat[idx] = dYd[idx] * savedGamma.data[c];
-        }
+  const savedXHat = new Tensor(new Float32Array(xHat), [b, c]);
+  engine.record('batch_norm', [x, gamma, beta], out, [x, gamma, savedXHat], dY => {
+    const dGamma = Tensor.zeros([1, c]);
+    const dBeta = Tensor.zeros([1, c]);
+    const dX = Tensor.zeros([b, c]);
+    for (let col = 0; col < c; col++) {
+      for (let row = 0; row < b; row++) {
+        const idx = row * c + col;
+        dGamma.data[col] += dY.data[idx] * savedXHat.data[idx];
+        dBeta.data[col] += dY.data[idx];
+        dX.data[idx] = dY.data[idx] * gamma.data[col];
       }
-
-      // dvar = sum(dx̂ * (x - μ) * -0.5 * stdInv³, axis=0)
-      const dVar = new Float32Array(C);
-      for (let c = 0; c < C; c++) {
-        const si3 = savedStdInv[c] * savedStdInv[c] * savedStdInv[c];
-        for (let b = 0; b < B; b++) {
-          const diff = savedX.data[b * C + c] - savedMean[c];
-          dVar[c] += dXhat[b * C + c] * diff * (-0.5) * si3;
-        }
-      }
-
-      // dmean = sum(dx̂ * -stdInv, axis=0) + dvar * mean(-2(x-μ), axis=0)
-      const dMean = new Float32Array(C);
-      for (let c = 0; c < C; c++) {
-        for (let b = 0; b < B; b++) {
-          dMean[c] += dXhat[b * C + c] * (-savedStdInv[c]);
-          dMean[c] += dVar[c] * (-2 * (savedX.data[b * C + c] - savedMean[c])) / B;
-        }
-      }
-
-      // dx = dx̂ * stdInv + dvar * 2(x-μ)/N + dmean/N
-      const dX = new Float32Array(B * C);
-      for (let b = 0; b < B; b++) {
-        for (let c = 0; c < C; c++) {
-          const idx = b * C + c;
-          const diff = savedX.data[idx] - savedMean[c];
-          dX[idx] = dXhat[idx] * savedStdInv[c]
-                  + dVar[c] * 2 * diff / B
-                  + dMean[c] / B;
-        }
-      }
-
-      return [
-        new NDArray(dX, [B, C]),
-        new NDArray(dGamma, [1, C]),
-        new NDArray(dBeta, [1, C])
-      ];
     }
-  );
-
-  return result;
+    return [dX, dGamma, dBeta];
+  });
+  return out;
 }

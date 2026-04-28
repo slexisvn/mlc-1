@@ -1,11 +1,11 @@
 import { expect, test } from 'vitest';
-import { NDArray } from '../../src/tensor/ndarray.js';
+import { Tensor } from '../../src/tensor/tensor.js';
 
 test('static constructors create expected shapes and fills', () => {
-  const zeros = NDArray.zeros([2, 3]);
-  const ones = NDArray.ones([2, 2]);
-  const full = NDArray.full([1, 4], 7);
-  const from = NDArray.fromArray([1, 2, 3, 4], [2, 2]);
+  const zeros = Tensor.zeros([2, 3]);
+  const ones = Tensor.ones([2, 2]);
+  const full = Tensor.full([1, 4], 7);
+  const from = Tensor.fromArray([1, 2, 3, 4], [2, 2]);
 
   expect(zeros.shape).toEqual([2, 3]);
   expect(Array.from(zeros.data)).toEqual([0, 0, 0, 0, 0, 0]);
@@ -15,15 +15,15 @@ test('static constructors create expected shapes and fills', () => {
 });
 
 test('computeStrides and ndim/size reflect shape metadata', () => {
-  const arr = NDArray.fromArray([1, 2, 3, 4, 5, 6], [2, 3]);
-  expect(NDArray.computeStrides([2, 3, 4])).toEqual([12, 4, 1]);
+  const arr = Tensor.fromArray([1, 2, 3, 4, 5, 6], [2, 3]);
+  expect(Tensor.computeStrides([2, 3, 4])).toEqual([12, 4, 1]);
   expect(arr.ndim).toBe(2);
   expect(arr.size).toBe(6);
 });
 
 test('rand and randn produce correct shape and finite values', () => {
-  const rand = NDArray.rand([2, 2]);
-  const randn = NDArray.randn([3, 1]);
+  const rand = Tensor.rand([2, 2]);
+  const randn = Tensor.randn([3, 1]);
   expect(rand.shape).toEqual([2, 2]);
   expect(randn.shape).toEqual([3, 1]);
   expect(Array.from(rand.data).every(Number.isFinite)).toBe(true);
@@ -31,13 +31,13 @@ test('rand and randn produce correct shape and finite values', () => {
 });
 
 test('get and set use flat indexing correctly', () => {
-  const arr = NDArray.zeros([2, 2]);
+  const arr = Tensor.zeros([2, 2]);
   arr.set([1, 0], 5);
   expect(arr.get([1, 0])).toBe(5);
 });
 
 test('reshape copies data and transpose swaps axes for 2D', () => {
-  const arr = NDArray.fromArray([1, 2, 3, 4], [2, 2]);
+  const arr = Tensor.fromArray([1, 2, 3, 4], [2, 2]);
   const reshaped = arr.reshape([4, 1]);
   const transposed = arr.transpose();
 
@@ -48,13 +48,13 @@ test('reshape copies data and transpose swaps axes for 2D', () => {
 });
 
 test('reshape/transpose reject invalid shapes and ranks', () => {
-  const arr = NDArray.fromArray([1, 2, 3, 4], [2, 2]);
+  const arr = Tensor.fromArray([1, 2, 3, 4], [2, 2]);
   expect(() => arr.reshape([3, 3])).toThrow('Cannot reshape');
-  expect(() => NDArray.fromArray([1, 2, 3], [3]).transpose()).toThrow('transpose() only for 2D');
+  expect(() => Tensor.fromArray([1, 2, 3], [3]).transpose()).toThrow('transpose() only for 2D');
 });
 
 test('scalar arithmetic and neg operate elementwise', () => {
-  const arr = NDArray.fromArray([1, 2, 3, 4], [2, 2]);
+  const arr = Tensor.fromArray([1, 2, 3, 4], [2, 2]);
   expect(Array.from(arr.add(1).data)).toEqual([2, 3, 4, 5]);
   expect(Array.from(arr.sub(1).data)).toEqual([0, 1, 2, 3]);
   expect(Array.from(arr.mul(2).data)).toEqual([2, 4, 6, 8]);
@@ -63,19 +63,19 @@ test('scalar arithmetic and neg operate elementwise', () => {
 });
 
 test('broadcast binary ops work and incompatible shapes throw', () => {
-  const a = NDArray.fromArray([1, 2, 3, 4], [2, 2]);
-  const b = NDArray.fromArray([10, 20], [2]);
-  const c = NDArray.fromArray([2], [1]);
+  const a = Tensor.fromArray([1, 2, 3, 4], [2, 2]);
+  const b = Tensor.fromArray([10, 20], [2]);
+  const c = Tensor.fromArray([2], [1]);
 
   expect(Array.from(a.add(b).data)).toEqual([11, 22, 13, 24]);
   expect(Array.from(a.sub(b).data)).toEqual([-9, -18, -7, -16]);
   expect(Array.from(a.mul(c).data)).toEqual([2, 4, 6, 8]);
   expect(Array.from(a.div(c).data)).toEqual([0.5, 1, 1.5, 2]);
-  expect(() => a.add(NDArray.fromArray([1, 2, 3], [3]))).toThrow('Cannot broadcast shapes');
+  expect(() => a.add(Tensor.fromArray([1, 2, 3], [3]))).toThrow('Cannot broadcast shapes');
 });
 
 test('sum/max/mean support full reduction, axis, negative axis, and keepDim', () => {
-  const arr = NDArray.fromArray([1, 2, 3, 4, 5, 6], [2, 3]);
+  const arr = Tensor.fromArray([1, 2, 3, 4, 5, 6], [2, 3]);
 
   expect(Array.from(arr.sum().data)).toEqual([21]);
   expect(arr.sum(1, true).shape).toEqual([2, 1]);
@@ -85,9 +85,9 @@ test('sum/max/mean support full reduction, axis, negative axis, and keepDim', ()
 });
 
 test('exp/log/abs/gt return expected transformed tensors', () => {
-  const arr = NDArray.fromArray([-1, 0, 1], [3]);
+  const arr = Tensor.fromArray([-1, 0, 1], [3]);
   const exp = arr.exp();
-  const log = NDArray.fromArray([1, Math.E], [2]).log();
+  const log = Tensor.fromArray([1, Math.E], [2]).log();
   const abs = arr.abs();
   const gt = arr.gt(0);
 
@@ -98,25 +98,24 @@ test('exp/log/abs/gt return expected transformed tensors', () => {
 });
 
 test('matmul computes product and validates inputs', () => {
-  const a = NDArray.fromArray([1, 2, 3, 4], [2, 2]);
-  const b = NDArray.fromArray([5, 6, 7, 8], [2, 2]);
+  const a = Tensor.fromArray([1, 2, 3, 4], [2, 2]);
+  const b = Tensor.fromArray([5, 6, 7, 8], [2, 2]);
   const result = a.matmul(b);
 
   expect(Array.from(result.data)).toEqual([19, 22, 43, 50]);
-  expect(() => NDArray.fromArray([1, 2], [2]).matmul(b)).toThrow('matmul requires 2D arrays');
-  expect(() => a.matmul(NDArray.fromArray([1, 2, 3, 4, 5, 6], [3, 2]))).toThrow('matmul shape mismatch');
+  expect(() => Tensor.fromArray([1, 2], [2]).matmul(b)).toThrow('matmul requires 2D arrays');
+  expect(() => a.matmul(Tensor.fromArray([1, 2, 3, 4, 5, 6], [3, 2]))).toThrow('matmul shape mismatch');
 });
 
 test('clone, allClose, and toString cover utility paths', () => {
-  const arr = NDArray.fromArray([1, 2, 3, 4], [2, 2]);
+  const arr = Tensor.fromArray([1, 2, 3, 4], [2, 2]);
   const clone = arr.clone();
   clone.data[0] = 99;
 
   expect(arr.data[0]).toBe(1);
-  expect(arr.allClose(NDArray.fromArray([1.000001, 2, 3, 4], [2, 2]))).toBe(true);
-  expect(arr.allClose(NDArray.fromArray([9, 2, 3, 4], [2, 2]))).toBe(false);
-  expect(NDArray.fromArray([1, 2], [2]).toString().startsWith('[')).toBe(true);
-  expect(arr.toString().includes('NDArray(shape=[')).toBe(true);
-  expect(NDArray.zeros([2, 2, 2]).toString().includes('size=8')).toBe(true);
+  expect(arr.allClose(Tensor.fromArray([1.000001, 2, 3, 4], [2, 2]))).toBe(true);
+  expect(arr.allClose(Tensor.fromArray([9, 2, 3, 4], [2, 2]))).toBe(false);
+  expect(Tensor.fromArray([1, 2], [2]).toString().startsWith('Tensor(') || Tensor.fromArray([1, 2], [2]).toString().startsWith('[')).toBe(true);
+  expect(arr.toString().includes('Tensor(shape=[')).toBe(true);
+  expect(Tensor.zeros([2, 2, 2]).toString().includes('size=8')).toBe(true);
 });
-

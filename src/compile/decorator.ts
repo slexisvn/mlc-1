@@ -1,31 +1,20 @@
 // ═══════════════════════════════════════════════════════════════
 //  MLC Compile Decorator
 //
-//  Wraps any Module with the full MLC inference pipeline:
-//    traceInference → buildIR → constantFold → fuseOps
-//    → deadCodeElimination → cseModule
+//  Wraps any Module with the forward-only MLC inference pipeline:
+//    traceInference → buildIR → constantFold → cseModule (analysis)
+//    → deadCodeElimination → fuseOps
 //    → lowerModule → arithmeticSimplify → storageRewrite
 //    → RuntimeModule
-//
-//  API:
-//    // Function-style (eager if inputShape given, lazy otherwise)
-//    const net = mlcCompile(model, { inputShape: [4, 32] });
-//    const out  = net.forward(input);
-//
-//    // Class decorator (always lazy — shape inferred from first forward())
-//    @compile({ inputShape: [4, 32] })
-//    class Classifier extends Sequential { ... }
 // ═══════════════════════════════════════════════════════════════
 
-import { NDArray } from '../tensor/ndarray.js';
-import { GradTensor } from '../autograd/engine.js';
-import { Loss } from '../loss/loss.js';
+import { Tensor } from '../tensor/tensor.js';
 import { type Module } from '../model/nn.js';
 import { Tracer } from '../trace/tracer.js';
-import { buildIR } from '../ir/high_level.js';
+import { buildIR, type Expr } from '../ir/high_level.js';
 import { inferModuleShapes } from '../transform/shape_infer.js';
 import { constantFold } from '../transform/constant_fold.js';
-import { fuseOps } from '../transform/op_fusion.js';
+import { fuseOps, fusionStats } from '../transform/op_fusion.js';
 import { deadCodeElimination } from '../transform/dead_code_elimination.js';
 import { cseModule } from '../transform/cse.js';
 import { lowerModule } from '../lower/lowering.js';
@@ -33,53 +22,182 @@ import { arithmeticSimplify } from '../transform/arithmetic_simplify.js';
 import { storageRewrite } from '../transform/storage_rewrite.js';
 import { RuntimeModule } from '../runtime/executor.js';
 import { PrimFunc } from '../ir/low_level.js';
-
-// ─── Public Interfaces ────────────────────────────────────────
+import type { RuntimeBackend } from '../runtime/executor.js';
+import { printPhaseBanner, printSubSection, printHighLevelIR, printTIR } from '../utils/printer.js';
+import { printVerifyResult, verifyHighLevelIR, verifyLowLevelIR } from '../transform/verifier.js';
+import { codegenWAT } from '../codegen/wat_codegen.js';
 
 export interface CompileOptions {
-  /** Provide to compile eagerly before any forward() call. */
-  inputShape?: number[];
-  /** Enable register-tiling in the JS codegen. Default: true. */
+  inputShape?: number[]; 
   useRegTile?: boolean;
-  /** Print pipeline stats (kernel names, timing) after compilation. Default: false. */
   verbose?: boolean;
+  backend?: RuntimeBackend;
 }
 
-export interface CompileStats {
-  inputShape: number[];
-  numKernels: number;
-  kernelNames: string[];
-  /** Wall-clock time spent in the MLC pipeline (ms). */
-  compilationMs: number;
-  /** Date.now() when compilation finished. */
-  compiledAt: number;
+function traceCompilerPhase(phase: number, title: string): void {
+  printPhaseBanner(phase, title);
 }
 
-export interface TrainingCompileArtifacts {
-  graph: ReturnType<Tracer['traceTraining']>;
-  forwardKernels: PrimFunc[];
-  lossKernels: PrimFunc[];
-  paramGradKernels: Map<string, PrimFunc[]>;
+function logVerification(label: string, result: ReturnType<typeof verifyHighLevelIR> | ReturnType<typeof verifyLowLevelIR>): void {
+  console.log(printVerifyResult(label, result));
 }
 
-function optimizeIRToPrimFuncs(irMod: ReturnType<typeof buildIR>): PrimFunc[] {
-  inferModuleShapes(irMod);
+function optimizeIRToPrimFuncs(
+  irMod: ReturnType<typeof buildIR>,
+  backend: RuntimeBackend,
+  verbose: boolean,
+): { primFuncs: PrimFunc[]; runtimeParamNames: string[] } {
+  if (verbose) {
+    traceCompilerPhase(2, 'High-Level IR Construction');
+    console.log(printHighLevelIR(irMod));
+    printSubSection('2.1 Shape Inference');
+  }
+
+  const shapeResult = inferModuleShapes(irMod);
+  if (verbose) {
+    console.log(shapeResult.table);
+    console.log(`  Inferred: ${shapeResult.inferred}/${shapeResult.totalOps} ops\n`);
+    logVerification('Phase 2 high-level IR', verifyHighLevelIR(irMod));
+    traceCompilerPhase(3, 'Graph-Level Optimizations');
+    printSubSection('3.1 Constant Folding');
+  }
+
   const folded = constantFold(irMod);
-  const fused = fuseOps(folded);
-  const { module: dceMod } = deadCodeElimination(fused);
-  const { module: cseMod } = cseModule(dceMod);
-  const primFuncsRaw = lowerModule(cseMod);
-  return primFuncsRaw.map(pf => storageRewrite(arithmeticSimplify(pf)).func);
+  if (verbose) {
+    console.log('  Applied constant folding pass');
+    printSubSection('3.2 Common Subexpression Elimination (CSE)');
+  }
+
+  const { stats: cseStats } = cseModule(folded);
+  if (verbose) {
+    console.log(`  Checked: ${cseStats.checked} nodes`);
+    console.log(`  Replaced: ${cseStats.replaced} duplicate(s)`);
+    console.log(`  LetExpr bindings created: ${cseStats.bindings} (IR linearized)`);
+    console.log('  Note: CSE is reported from the tree IR; lowering still continues from the dead-code-pruned graph to keep fusion stable.');
+    printSubSection('3.3 Dead Code Elimination');
+  }
+
+  const { module: dceMod, stats: dceStats } = deadCodeElimination(folded);
+  if (verbose) {
+    console.log(`  Before: ${dceStats.totalBefore} ops`);
+    console.log(`  After:  ${dceStats.totalAfter} ops`);
+    console.log(`  Eliminated: ${dceStats.eliminated} dead node(s)`);
+    printSubSection('3.4 Operator Fusion');
+  }
+
+  const fused = fuseOps(dceMod);
+  if (verbose) {
+    console.log('\n  After fusion:');
+    console.log(printHighLevelIR(fused));
+    const stats = fusionStats(fused);
+    console.log(`  Summary: ${stats.totalOps} total ops, ${stats.fusedOps} fused`);
+    for (const group of stats.fusedGroups) {
+      console.log(`    ${group}`);
+    }
+    logVerification('Phase 3 high-level IR', verifyHighLevelIR(fused));
+    traceCompilerPhase(4, 'Operator Lowering (→ TensorIR / Loop Nests)');
+  }
+
+  const primFuncsRaw = lowerModule(fused);
+  if (verbose) {
+    console.log(`  Lowered ${primFuncsRaw.length} PrimFunc(s):\n`);
+    for (const pf of primFuncsRaw) {
+      console.log(printTIR(pf));
+      console.log('');
+    }
+    logVerification('Phase 4 low-level IR', verifyLowLevelIR(primFuncsRaw));
+    traceCompilerPhase(5, 'TensorIR Passes');
+    printSubSection('5.1 Arithmetic Simplification');
+  }
+
+  const simplified = primFuncsRaw.map((pf) => {
+    const next = arithmeticSimplify(pf);
+    if (verbose) {
+      console.log(`  ${pf.name}: applied algebraic rewrite rules`);
+    }
+    return next;
+  });
+
+  let optimized: PrimFunc[];
+  if (backend === 'wat') {
+    optimized = simplified;
+    if (verbose) {
+      printSubSection('5.2 Storage Rewrite');
+      console.log('  WAT backend: skipped storage rewrite to preserve the current WAT runtime pipeline.');
+      printSubSection('5.3 WebAssembly Text (WAT)');
+      const watModule = codegenWAT(optimized);
+      const pages = Math.ceil(watModule.totalBytes / 65536);
+      console.log(`  WAT module: ${optimized.length} kernel(s), ${pages} page(s) of linear memory`);
+      console.log(`  Exports: ${watModule.exports.join(', ')}`);
+      for (const kernel of watModule.kernels) {
+        console.log(`  ${kernel.name}: ${kernel.mode} (${kernel.weightLayout}) — ${kernel.note}`);
+      }
+      console.log('');
+      console.log(watModule.text);
+    }
+  } else {
+    if (verbose) {
+      printSubSection('5.2 Storage Rewrite');
+    }
+    optimized = simplified.map((pf) => {
+      const { func, stats } = storageRewrite(pf);
+      if (verbose) {
+        if (stats.promotedToScalar.length > 0) {
+          console.log(`  ${pf.name}: promoted [${stats.promotedToScalar.join(', ')}] to scalar`);
+          console.log(`    alloc: ${stats.originalAllocBytes}B → ${stats.optimizedAllocBytes}B`);
+        } else {
+          console.log(`  ${pf.name}: no scalar promotion needed`);
+        }
+      }
+      return func;
+    });
+  }
+
+  const uniquified = uniquifyPrimFuncNames(optimized);
+  return {
+    primFuncs: uniquified,
+    runtimeParamNames: collectRuntimeParamNames(fused.getFunction('main')?.body),
+  };
 }
 
-// ─── CompiledModule ───────────────────────────────────────────
+function collectRuntimeParamNames(expr: Expr | undefined): string[] {
+  if (!expr) return [];
+
+  const names: string[] = [];
+
+  function visit(node: Expr): void {
+    if (node.kind === 'constant') {
+      if (node.name.startsWith('param_')) names.push(node.name);
+      return;
+    }
+    if (node.kind === 'var') return;
+    if (node.kind === 'let') {
+      visit(node.body);
+      return;
+    }
+    for (const arg of node.args) visit(arg);
+  }
+
+  visit(expr);
+  return names;
+}
+
+function uniquifyPrimFuncNames(primFuncs: PrimFunc[]): PrimFunc[] {
+  const counts = new Map<string, number>();
+  return primFuncs.map((pf) => {
+    const nextCount = counts.get(pf.name) ?? 0;
+    counts.set(pf.name, nextCount + 1);
+    if (nextCount === 0) return pf;
+    const cloned = pf.clone();
+    cloned.name = `${pf.name}_${nextCount}`;
+    return cloned;
+  });
+}
 
 export class CompiledModule {
   private _model: Module;
   private _opts: Required<CompileOptions>;
   private _runtime: RuntimeModule | null = null;
-  private _stats: CompileStats | null = null;
-  /** PrimFuncs produced by the last compilation (exposed for inspection). */
   primFuncs: PrimFunc[] = [];
 
   constructor(model: Module, opts: CompileOptions = {}) {
@@ -87,189 +205,122 @@ export class CompiledModule {
     this._opts = {
       inputShape: opts.inputShape ?? [],
       useRegTile: opts.useRegTile ?? true,
-      verbose:    opts.verbose    ?? false,
+      verbose: opts.verbose ?? false,
+      backend: opts.backend ?? 'js',
     };
 
-    // Eager: compile now if inputShape is provided
     if (this._opts.inputShape.length > 0) {
       this._compile(this._opts.inputShape);
     }
   }
 
-  // ── Public API ──────────────────────────────────────────────
-
-  /**
-   * Run compiled forward pass.
-   * On the first call of a lazy-compiled module the MLC pipeline
-   * runs automatically using the shape of `input`.
-   */
-  forward(input: NDArray | GradTensor): NDArray {
-    const nd = input instanceof GradTensor ? input.data : input;
-
+  forward(input: Tensor): Tensor {
     if (!this._runtime) {
-      this._compile(nd.shape);
+      this._compile(input.shape);
     }
-
-    return this._runtime!.forward(nd);
+    return this._runtime!.forward(input);
   }
-
-  /** Returns compilation metadata. Null if not yet compiled (lazy, pre-first-call). */
-  getStats(): CompileStats | null {
-    return this._stats;
-  }
-
-  /**
-   * Force re-trace and recompile with a new input shape.
-   * Needed when batch size or input dimensions change.
-   */
   recompile(inputShape: number[]): void {
     this._runtime = null;
-    this._stats   = null;
     this.primFuncs = [];
     this._compile(inputShape);
   }
 
-  // ── Private ──────────────────────────────────────────────────
-
   private _compile(inputShape: number[]): void {
     const t0 = performance.now();
+    const tracer = new Tracer();
+    if (this._opts.verbose) {
+      traceCompilerPhase(1, 'Model Tracing (Capture Computation Graph)');
+    }
+    const graph = tracer.traceInference(this._model, inputShape);
+    if (this._opts.verbose) {
+      console.log(Tracer.printGraph(graph));
+    }
+    const irMod = buildIR(graph);
+    const optimized = optimizeIRToPrimFuncs(irMod, this._opts.backend, this._opts.verbose);
 
-    // 1. Trace inference graph
-    const tracer   = new Tracer();
-    const graph    = tracer.traceInference(this._model, inputShape);
+    this.primFuncs = optimized.primFuncs;
 
-    // 2. High-level IR + graph-level optimizations
-    const irMod    = buildIR(graph);
-    const optimized = optimizeIRToPrimFuncs(irMod);
-
-    this.primFuncs = optimized;
-
-    // 5. Build params map: param_0 → W0, param_1 → B0, ...
-    const params    = this._model.parameters();
-    const paramsMap = new Map<string, NDArray>();
-    params.forEach((p, i) => paramsMap.set(`param_${i}`, p.data));
-
-    // 6. Instantiate RuntimeModule
-    this._runtime = new RuntimeModule(optimized, paramsMap, this._opts.useRegTile);
-
-    const compilationMs = performance.now() - t0;
-
-    this._stats = {
-      inputShape:    inputShape.slice(),
-      numKernels:    optimized.length,
-      kernelNames:   optimized.map(pf => pf.name),
-      compilationMs,
-      compiledAt:    Date.now(),
-    };
+    const paramsMap = new Map<string, Tensor>();
+    for (const name of optimized.runtimeParamNames) {
+      const traced = graph.params.get(name);
+      if (traced) {
+        paramsMap.set(name, traced.tensor);
+      }
+    }
 
     if (this._opts.verbose) {
-      console.log(`[mlcCompile] Compiled in ${compilationMs.toFixed(1)}ms`);
-      console.log(`  inputShape : [${inputShape.join(', ')}]`);
-      console.log(`  kernels    : ${optimized.length}`);
-      for (const pf of optimized) {
-        const sig = pf.params.map(p => `${p.name}[${p.shape.join('×')}]`).join(', ');
-        console.log(`    ${pf.name}(${sig})`);
+      traceCompilerPhase(6, 'Runtime Build');
+    }
+    this._runtime = new RuntimeModule(this.primFuncs, paramsMap, this._opts.backend, this._opts.useRegTile);
+
+    const compilationMs = performance.now() - t0;
+    if (this._opts.verbose) {
+      console.log(`  Backend: ${this._opts.backend}`);
+      console.log(`  Input shape: [${inputShape.join(', ')}]`);
+      console.log(`  Final kernels: ${this.primFuncs.map((pf) => pf.name).join(', ')}`);
+      if (this._opts.backend === 'wat') {
+        const wasmInfo = this._runtime.getWasmDebugInfo();
+        if (wasmInfo) {
+          console.log(`  Params preloaded once: ${wasmInfo.paramsUploadedOnce ? 'yes' : 'no'}`);
+          console.log(`  WASM memory: params=${wasmInfo.paramBytes}B activations=${wasmInfo.activationBytes}B total=${wasmInfo.totalBytes}B (${wasmInfo.totalPages} page(s))`);
+          for (const kernel of wasmInfo.kernels) {
+            console.log(`  ${kernel.name}: ${kernel.mode}, weight=${kernel.originalWeightBytes}B → ${kernel.packedWeightBytes}B, out=[${kernel.outputShape.join(', ')}]`);
+          }
+        }
       }
+      console.log(`  Compile time: ${compilationMs.toFixed(1)}ms`);
     }
   }
 }
 
-export function compileTrainingArtifacts(
-  model: Module,
-  loss: Loss,
-  inputShape: number[],
-  targetShape: number[]
-): TrainingCompileArtifacts {
-  const tracer = new Tracer();
-  const graph = tracer.traceTraining(model, loss, inputShape, targetShape);
-
-  const forwardKernels = optimizeIRToPrimFuncs(buildIR(graph));
-  const lossKernels = optimizeIRToPrimFuncs(buildIR(graph, { root: 'loss' }));
-  const paramGradKernels = new Map<string, PrimFunc[]>();
-
-  for (const [name, info] of graph.params) {
-    const gradId = graph.gradientIds.get(info.tensor.id);
-    if (gradId === undefined) continue;
-    paramGradKernels.set(name, optimizeIRToPrimFuncs(buildIR(graph, { rootId: gradId })));
-  }
-
-  return {
-    graph,
-    forwardKernels,
-    lossKernels,
-    paramGradKernels,
-  };
-}
-
-// ─── mlcCompile() ────────────────────────────────────────────
-
-/**
- * Wrap a Module with the MLC inference pipeline.
- *
- * @param model   Any Module (Sequential, custom class, etc.)
- * @param opts    Optional compile options
- * @returns       CompiledModule — call .forward(input) to run
- *
- * @example
- *   const net = mlcCompile(model, { inputShape: [4, 32] });
- *   const out = net.forward(input);  // runs compiled kernels
- */
 export function mlcCompile(model: Module, opts: CompileOptions = {}): CompiledModule {
   return new CompiledModule(model, opts);
 }
 
-// ─── @compile class decorator (Stage 3 TS5) ──────────────────
+export function compileTrained(model: Module, opts: CompileOptions = {}): CompiledModule {
+  return mlcCompile(model, opts);
+}
 
 type Constructor<T = object> = new (...args: any[]) => T;
 
-/**
- * Class decorator that transparently replaces `forward()` with the
- * MLC-compiled version. Compilation is always lazy (triggered on the
- * first `forward()` call so the input shape is known).
- *
- * @example
- *   @compile({ verbose: true })
- *   class Classifier extends Sequential { ... }
- *
- *   const net = new Classifier([new Linear(32, 64), new ReLU(), new Linear(64, 8)]);
- *   const out = net.forward(input);  // compiles on first call
- */
 export function compile(opts: CompileOptions = {}): <T extends Constructor<Module>>(Base: T) => T {
   return function <T extends Constructor<Module>>(Base: T): T {
     return class extends Base {
       private _compiled: CompiledModule | null = null;
 
-      override forward(x: GradTensor): GradTensor {
-        const nd = x instanceof GradTensor ? x.data : x as unknown as NDArray;
-
-        if (!this._compiled) {
-          // Lazy: infer shape from the first real input.
-          // IMPORTANT: pass a shim whose forward() delegates to Base.prototype.forward,
-          // NOT to this.forward (the patched version). Without this, CompiledModule's
-          // tracer calls model.forward() → hits this override again → infinite recursion.
-          const self = this;
-          const baseShim: Module = {
-            forward(inp: GradTensor): GradTensor {
-              return Base.prototype.forward.call(self, inp);
-            },
-            parameters(): GradTensor[] {
-              return self.parameters();
-            },
-          };
-          this._compiled = new CompiledModule(baseShim, {
-            ...opts,
-            inputShape: nd.shape,
-          });
-        }
-
-        const out = this._compiled.forward(nd);
-        // Wrap NDArray back into a GradTensor (no grad required — inference only)
-        return new GradTensor(out, false);
+      private _createBaseShim(): Module {
+        const self = this;
+        return {
+          training: self.training,
+          forward(inp: Tensor): Tensor {
+            return Base.prototype.forward.call(self, inp);
+          },
+          parameters(): Tensor[] {
+            return self.parameters();
+          },
+          children(): Module[] {
+            return self.children();
+          },
+          train(): Module {
+            self.train();
+            return this;
+          },
+          eval(): Module {
+            self.eval();
+            return this;
+          },
+        };
       }
 
-      /** Access compile stats (null before first forward()). */
-      getCompileStats(): CompileStats | null {
-        return this._compiled?.getStats() ?? null;
+      override forward(x: Tensor): Tensor {
+        if (!this._compiled) {
+          this._compiled = new CompiledModule(this._createBaseShim(), {
+            ...opts,
+            inputShape: x.shape,
+          });
+        }
+        return this._compiled.forward(x);
       }
     } as T;
   };

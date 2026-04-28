@@ -3,23 +3,29 @@
 //  weight = weight - lr * grad
 // ═══════════════════════════════════════════════════════════════
 
-import { GradTensor } from '../autograd/engine.js';
+import { Tensor } from '../tensor/tensor.js';
+import { Optimizer } from './types.js';
 
-export class SGD {
-  params: GradTensor[];
+export interface SGDOptions {
   lr: number;
+}
 
-  constructor(params: GradTensor[], lr: number) {
+export class SGD implements Optimizer {
+  readonly type = 'sgd' as const;
+  readonly params: Tensor[];
+  readonly lr: number;
+
+  constructor(params: Tensor[], opts: number | SGDOptions) {
     this.params = params;
-    this.lr = lr;
+    this.lr = typeof opts === 'number' ? opts : opts.lr;
   }
 
   step(): void {
     for (const param of this.params) {
       if (param.grad) {
         // In-place update: W = W - lr * grad
-        for (let i = 0; i < param.data.size; i++) {
-          param.data.data[i] -= this.lr * param.grad.data[i];
+        for (let i = 0; i < param.size; i++) {
+          param.data[i] -= this.lr * param.grad.data[i];
         }
       }
     }

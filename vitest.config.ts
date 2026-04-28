@@ -6,12 +6,7 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'text-summary'],
-      exclude: [
-        'tests/**',
-        'src/main.ts',
-        'src/test_wat.ts',
-        'src/test_decorator_compile.ts',
-      ],
+      exclude: ['tests/**'],
     },
   },
 });

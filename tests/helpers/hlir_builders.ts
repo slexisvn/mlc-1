@@ -1,6 +1,6 @@
 // ─── High-Level IR fixture builders ───────────────────────────────
 
-import { NDArray } from '../../src/tensor/ndarray.js';
+import { Tensor } from '../../src/tensor/tensor.js';
 import {
   VarExpr, ConstantExpr, CallExpr, LetExpr,
   IRModule, IRFunction, TensorType, Op, OpPattern, OP_REGISTRY,
@@ -14,7 +14,7 @@ export function mkVar(name: string, shape: number[]): VarExpr {
 }
 
 export function mkConst(data: number[], shape: number[], name = 'c'): ConstantExpr {
-  return new ConstantExpr(NDArray.fromArray(data, shape), name);
+  return new ConstantExpr(Tensor.fromArray(data, shape), name);
 }
 
 // ─── Call builder ───

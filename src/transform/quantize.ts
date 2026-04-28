@@ -26,7 +26,6 @@
 //    asymmetric (non-zero zero_point) but we keep it simple here.
 // ═══════════════════════════════════════════════════════════════
 
-import { NDArray } from '../tensor/ndarray.js';
 import { IRModule, IRFunction, CallExpr, ConstantExpr, VarExpr, LetExpr, type Expr } from '../ir/high_level.js';
 
 // ─── Quantization config ───
@@ -60,7 +59,7 @@ export interface QuantizedWeight {
   name: string;
   originalShape: number[];
   quantParams: QuantParams;
-  /** int8 values stored as Float32 (since JS has no Int8Array in NDArray) */
+  /** int8 values stored as Float32 for JS compatibility */
   quantizedData: Float32Array;
   /** Dequantized values (int8 * scale) for inference */
   dequantizedData: Float32Array;
@@ -159,8 +158,7 @@ function collectConstants(expr: Expr, out: Map<ConstantExpr, string>): void {
 }
 
 // ─── Replace ConstantExpr data in-place ───
-// We mutate the .data.data field of ConstantExpr to use dequantized weights.
-// This is safe because ConstantExpr owns its NDArray.
+// We mutate the tensor payload of ConstantExpr to use dequantized weights.
 
 function replaceConstantData(expr: Expr, replacements: Map<ConstantExpr, Float32Array>): void {
   switch (expr.kind) {

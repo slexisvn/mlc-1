@@ -4,26 +4,26 @@
 //  evaluate at compile time and replace with Constant node.
 // ═══════════════════════════════════════════════════════════════
 
-import { NDArray } from '../tensor/ndarray.js';
+import { Tensor } from '../tensor/tensor.js';
 import {
   Expr, CallExpr, ConstantExpr, VarExpr, LetExpr,
   IRModule, IRFunction, TensorType
 } from '../ir/high_level.js';
 
 // Evaluate a call node with all-constant inputs
-function evaluateConstantCall(op: string, args: NDArray[]): NDArray | null {
+function evaluateConstantCall(op: string, args: Tensor[]): Tensor | null {
   switch (op) {
     case 'add':        return args[0].add(args[1]);
     case 'subtract':   return args[0].sub(args[1]);
     case 'multiply':   return args[0].mul(args[1]);
     case 'nn.relu': {
-      const out = NDArray.zeros(args[0].shape);
+      const out = Tensor.zeros(args[0].shape);
       for (let i = 0; i < args[0].size; i++)
         out.data[i] = Math.max(args[0].data[i], 0);
       return out;
     }
     case 'nn.sigmoid': {
-      const out = NDArray.zeros(args[0].shape);
+      const out = Tensor.zeros(args[0].shape);
       for (let i = 0; i < args[0].size; i++)
         out.data[i] = 1 / (1 + Math.exp(-args[0].data[i]));
       return out;
