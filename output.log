@@ -1,8 +1,8 @@
 === Trainer-first Showcase ===
-Initial loss: 1.1394
-Initial val loss: 1.1067
-Final loss: 0.7192
-Final val loss: 0.8455
+Initial loss: 1.0957
+Initial val loss: 1.1042
+Final loss: 0.6683
+Final val loss: 0.8169
 
 ════════════════════════════════════════════════════════════
   Phase 1: Model Tracing (Capture Computation Graph)
@@ -210,11 +210,7 @@ Parameters: 12
 ════════════════════════════════════════════════════════════
 
 ── 5.1 Arithmetic Simplification ──
-  fused_dense_bias_relu: applied algebraic rewrite rules
-  fused_dense_bias_relu_1: applied algebraic rewrite rules
-  fused_dense_bias_relu_2: applied algebraic rewrite rules
-  fused_dense_bias_relu_3: applied algebraic rewrite rules
-  fused_dense_bias: applied algebraic rewrite rules
+  Arithmetic simplification already applied during this compile.
 
 ── 5.2 Storage Rewrite ──
   fused_dense_bias_relu: promoted [acc] to scalar
@@ -234,219 +230,17 @@ Parameters: 12
   Backend: js
   Input shape: [4, 4]
   Final kernels: fused_dense_bias_relu, fused_dense_bias_relu_1, fused_dense_bias_relu_2, fused_dense_bias_relu_3, fused_dense_bias
-  Compile time: 12.1ms
+  Compile time: 9.9ms
 
-════════════════════════════════════════════════════════════
-  Phase 1: Model Tracing (Capture Computation Graph)
-════════════════════════════════════════════════════════════
-═══ Traced Computation Graph ═══
-Input: id=1204 shape=[4,4]
-
-── Forward ──
-  %1207 = nn.dense(%1204, %1) → [4,128]
-  %1209 = bias_add(%1207, %2) → [4,128]
-  %1210 = relu(%1209) → [4,128]
-  %1213 = nn.dense(%1210, %4) → [4,256]
-  %1215 = bias_add(%1213, %5) → [4,256]
-  %1216 = relu(%1215) → [4,256]
-  %1219 = nn.dense(%1210, %7) → [4,64]
-  %1221 = bias_add(%1219, %8) → [4,64]
-  %1222 = relu(%1221) → [4,64]
-  %1225 = nn.dense(%1210, %7) → [4,64]
-  %1227 = bias_add(%1225, %8) → [4,64]
-  %1228 = relu(%1227) → [4,64]
-  %1231 = nn.dense(%1216, %10) → [4,256]
-  %1233 = bias_add(%1231, %11) → [4,256]
-  %1234 = relu(%1233) → [4,256]
-  %1237 = nn.dense(%1234, %13) → [4,128]
-  %1239 = bias_add(%1237, %14) → [4,128]
-  %1240 = relu(%1239) → [4,128]
-  %1243 = nn.dense(%1240, %16) → [4,3]
-  %1245 = bias_add(%1243, %17) → [4,3]
-
-Output: id=1245 shape=[4,3]
-Parameters: 12
-  param_0: [128,4]
-  param_1: [1,128]
-  param_2: [256,128]
-  param_3: [1,256]
-  param_4: [64,128]
-  param_5: [1,64]
-  param_6: [256,256]
-  param_7: [1,256]
-  param_8: [128,256]
-  param_9: [1,128]
-  param_10: [3,128]
-  param_11: [1,3]
-
-════════════════════════════════════════════════════════════
-  Phase 2: High-Level IR Construction
-════════════════════════════════════════════════════════════
-@main(%x: Tensor[(4, 4), float32]) → Tensor[(4, 3), float32] {
-
-}
-
-
-── 2.1 Shape Inference ──
-  Op                           Input shapes                   → Output      
-  ──────────────────────────────────────────────────────────────────────────
-  nn.dense                     [4,4] × [128,4]                → [4,128]
-  nn.bias_add                  [4,128] × [1,128]              → [4,128]
-  nn.relu                      [4,128]                        → [4,128]
-  nn.dense                     [4,128] × [64,128]             → [4,64]
-  nn.bias_add                  [4,64] × [1,64]                → [4,64]
-  nn.relu                      [4,64]                         → [4,64]
-  nn.dense                     [4,4] × [128,4]                → [4,128]
-  nn.bias_add                  [4,128] × [1,128]              → [4,128]
-  nn.relu                      [4,128]                        → [4,128]
-  nn.dense                     [4,128] × [64,128]             → [4,64]
-  nn.bias_add                  [4,64] × [1,64]                → [4,64]
-  nn.dense                     [4,4] × [128,4]                → [4,128]
-  nn.bias_add                  [4,128] × [1,128]              → [4,128]
-  nn.relu                      [4,128]                        → [4,128]
-  nn.dense                     [4,128] × [64,128]             → [4,64]
-  nn.dense                     [4,4] × [128,4]                → [4,128]
-  nn.bias_add                  [4,128] × [1,128]              → [4,128]
-  nn.relu                      [4,128]                        → [4,128]
-  nn.dense                     [4,128] × [64,128]             → [4,64]
-  nn.bias_add                  [4,64] × [1,64]                → [4,64]
-  nn.relu                      [4,64]                         → [4,64]
-  nn.dense                     [4,4] × [128,4]                → [4,128]
-  nn.bias_add                  [4,128] × [1,128]              → [4,128]
-  nn.relu                      [4,128]                        → [4,128]
-  nn.dense                     [4,128] × [64,128]             → [4,64]
-  nn.bias_add                  [4,64] × [1,64]                → [4,64]
-  nn.dense                     [4,4] × [128,4]                → [4,128]
-  nn.bias_add                  [4,128] × [1,128]              → [4,128]
-  nn.relu                      [4,128]                        → [4,128]
-  nn.dense                     [4,128] × [64,128]             → [4,64]
-  nn.dense                     [4,4] × [128,4]                → [4,128]
-  nn.bias_add                  [4,128] × [1,128]              → [4,128]
-  nn.relu                      [4,128]                        → [4,128]
-  nn.dense                     [4,128] × [256,128]            → [4,256]
-  nn.bias_add                  [4,256] × [1,256]              → [4,256]
-  nn.relu                      [4,256]                        → [4,256]
-  nn.dense                     [4,256] × [256,256]            → [4,256]
-  nn.bias_add                  [4,256] × [1,256]              → [4,256]
-  nn.relu                      [4,256]                        → [4,256]
-  nn.dense                     [4,256] × [128,256]            → [4,128]
-  nn.bias_add                  [4,128] × [1,128]              → [4,128]
-  nn.relu                      [4,128]                        → [4,128]
-  nn.dense                     [4,128] × [3,128]              → [4,3]
-  nn.bias_add                  [4,3] × [1,3]                  → [4,3]
-  Inferred: 44/44 ops
-
-  IR Verify [Phase 2 high-level IR]: ✓ OK
-
-════════════════════════════════════════════════════════════
-  Phase 3: Graph-Level Optimizations
-════════════════════════════════════════════════════════════
-
-── 3.1 Constant Folding ──
-  Applied constant folding pass
-
-── 3.2 Common Subexpression Elimination (CSE) ──
-  Checked: 44 nodes
-  Replaced: 27 duplicate(s)
-  LetExpr bindings created: 17 (IR linearized)
-  Note: CSE is reported from the tree IR; lowering still continues from the dead-code-pruned graph to keep fusion stable.
-
-── 3.3 Dead Code Elimination ──
-  Before: 44 ops
-  After:  14 ops
-  Eliminated: 30 dead node(s)
-
-── 3.4 Operator Fusion ──
-
-  After fusion:
-@main(%x: Tensor[(4, 4), float32]) → Tensor[(4, 3), float32] {
-  %0 = fused.dense_bias_relu(%x, meta[param_0], meta[param_1])  // [4,128]  /* fused: nn.dense → nn.bias_add → nn.relu */
-  %1 = fused.dense_bias_relu(%0, meta[param_2], meta[param_3])  // [4,256]  /* fused: nn.dense → nn.bias_add → nn.relu */
-  %2 = fused.dense_bias_relu(%1, meta[param_6], meta[param_7])  // [4,256]  /* fused: nn.dense → nn.bias_add → nn.relu */
-  %3 = fused.dense_bias_relu(%2, meta[param_8], meta[param_9])  // [4,128]  /* fused: nn.dense → nn.bias_add → nn.relu */
-  %4 = fused.dense_bias(%3, meta[param_10], meta[param_11])  // [4,3]  /* fused: nn.dense → nn.bias_add */
-}
-
-  Summary: 5 total ops, 5 fused
-    nn.dense+nn.bias_add → fused.dense_bias
-    nn.dense+nn.bias_add+nn.relu → fused.dense_bias_relu
-    nn.dense+nn.bias_add+nn.relu → fused.dense_bias_relu
-    nn.dense+nn.bias_add+nn.relu → fused.dense_bias_relu
-    nn.dense+nn.bias_add+nn.relu → fused.dense_bias_relu
-  IR Verify [Phase 3 high-level IR]: ✓ OK
-
-════════════════════════════════════════════════════════════
-  Phase 4: Operator Lowering (→ TensorIR / Loop Nests)
-════════════════════════════════════════════════════════════
-  Lowered 5 PrimFunc(s):
-
-@fused_dense_bias_relu(A: Buffer[4,4], W: Buffer[128,4], B: Buffer[1,128], Out: Buffer[4,128]) {
-  alloc acc: float32[1]  scope=local
-  for i in range(0, 4):
-    for j in range(0, 128):
-      acc[0] = 0
-      for k in range(0, 4):  // reduction
-        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
-      acc[0] = (acc[0] + B[0, j])
-      Out[i, j] = max(acc[0], 0)
-}
-
-@fused_dense_bias_relu_1(A: Buffer[4,128], W: Buffer[256,128], B: Buffer[1,256], Out: Buffer[4,256]) {
-  alloc acc: float32[1]  scope=local
-  for i in range(0, 4):
-    for j in range(0, 256):
-      acc[0] = 0
-      for k in range(0, 128):  // reduction
-        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
-      acc[0] = (acc[0] + B[0, j])
-      Out[i, j] = max(acc[0], 0)
-}
-
-@fused_dense_bias_relu_2(A: Buffer[4,256], W: Buffer[256,256], B: Buffer[1,256], Out: Buffer[4,256]) {
-  alloc acc: float32[1]  scope=local
-  for i in range(0, 4):
-    for j in range(0, 256):
-      acc[0] = 0
-      for k in range(0, 256):  // reduction
-        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
-      acc[0] = (acc[0] + B[0, j])
-      Out[i, j] = max(acc[0], 0)
-}
-
-@fused_dense_bias_relu_3(A: Buffer[4,256], W: Buffer[128,256], B: Buffer[1,128], Out: Buffer[4,128]) {
-  alloc acc: float32[1]  scope=local
-  for i in range(0, 4):
-    for j in range(0, 128):
-      acc[0] = 0
-      for k in range(0, 256):  // reduction
-        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
-      acc[0] = (acc[0] + B[0, j])
-      Out[i, j] = max(acc[0], 0)
-}
-
-@fused_dense_bias(A: Buffer[4,128], W: Buffer[3,128], B: Buffer[1,3], Out: Buffer[4,3]) {
-  alloc acc: float32[1]  scope=local
-  for i in range(0, 4):
-    for j in range(0, 3):
-      acc[0] = 0
-      for k in range(0, 128):  // reduction
-        acc[0] = (acc[0] + (A[i, k] * W[j, k]))
-      acc[0] = (acc[0] + B[0, j])
-      Out[i, j] = acc[0]
-}
-
-  IR Verify [Phase 4 low-level IR]: ✓ OK
+Reusing cached frontend compile artifacts for input shape [4, 4].
+Shared phases 1-4 are skipped; only backend-specific work is shown below.
 
 ════════════════════════════════════════════════════════════
   Phase 5: TensorIR Passes
 ════════════════════════════════════════════════════════════
 
 ── 5.1 Arithmetic Simplification ──
-  fused_dense_bias_relu: applied algebraic rewrite rules
-  fused_dense_bias_relu_1: applied algebraic rewrite rules
-  fused_dense_bias_relu_2: applied algebraic rewrite rules
-  fused_dense_bias_relu_3: applied algebraic rewrite rules
-  fused_dense_bias: applied algebraic rewrite rules
+  Reused cached arithmetic-simplified PrimFunc(s) from the previous compile.
 
 ── 5.2 Storage Rewrite ──
   WAT backend: skipped storage rewrite to preserve the current WAT runtime pipeline.
@@ -1053,7 +847,7 @@ Parameters: 12
   fused_dense_bias_relu_2: simd-f32x4, weight=262144B → 262144B, out=[4, 256]
   fused_dense_bias_relu_3: simd-f32x4, weight=131072B → 131072B, out=[4, 128]
   fused_dense_bias: scalar, weight=1536B → 1536B, out=[4, 3]
-  Compile time: 35.2ms
+  Compile time: 19.4ms
 
 === Post-training Compile ===
 Model mode: eval
@@ -1071,14 +865,14 @@ Train eager accuracy:    100.0%
 Train WAT predictions: [0, 1, 2, 1]
 Train WAT targets:     [0, 1, 2, 1]
 Train WAT accuracy:    100.0%
-Val eager predictions: [0, 1, 2, 1]
+Val eager predictions: [1, 1, 1, 1]
 Val eager targets:     [0, 1, 2, 1]
-Val eager accuracy:    100.0%
-Val WAT predictions: [0, 1, 2, 1]
+Val eager accuracy:    50.0%
+Val WAT predictions: [1, 1, 1, 1]
 Val WAT targets:     [0, 1, 2, 1]
-Val WAT accuracy:    100.0%
+Val WAT accuracy:    50.0%
 
 === Backend Benchmark ===
-JS forward: 0.4826 ms/call
-WAT forward: 0.1407 ms/call
-Speedup: 3.43x (WAT faster)
+JS forward: 0.4571 ms/call
+WAT forward: 0.1525 ms/call
+Speedup: 3.00x (WAT faster)

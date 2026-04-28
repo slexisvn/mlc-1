@@ -34,6 +34,7 @@ export class Trainer {
   readonly lossFn: Loss | null;
   readonly lightningModule: LightningModule | null;
   readonly maxSteps?: number;
+  private readonly compiledCache = new Map<string, CompiledModule>();
 
   constructor(opts: TrainerOptions | LightningTrainerOptions) {
     if (isLightningOptions(opts)) {
@@ -93,6 +94,7 @@ export class Trainer {
 
     this.optimizer.step();
     this.optimizer.zeroGrad();
+    this.compiledCache.clear();
     return loss;
   }
 
@@ -114,7 +116,23 @@ export class Trainer {
   }
 
   compileModel(opts: CompileOptions = {}): CompiledModule {
-    return compileTrained(this.model, opts);
+    const backend = opts.backend ?? 'js';
+    const useRegTile = opts.useRegTile ?? true;
+    const inputShape = opts.inputShape ?? [];
+    const key = `${backend}|${useRegTile ? 'reg' : 'plain'}|${inputShape.join('x')}`;
+
+    const cached = this.compiledCache.get(key);
+    if (cached) {
+      if (opts.verbose) {
+        console.log('');
+        console.log(`Reusing cached compiled model for backend '${backend}' and input shape [${inputShape.join(', ')}].`);
+      }
+      return cached;
+    }
+
+    const compiled = compileTrained(this.model, opts);
+    this.compiledCache.set(key, compiled);
+    return compiled;
   }
 
   private requireLossFn(): Loss {

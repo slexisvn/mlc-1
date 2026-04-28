@@ -10,7 +10,7 @@
 
 import { Tensor } from '../tensor/tensor.js';
 import { type Module } from '../model/nn.js';
-import { Tracer } from '../trace/tracer.js';
+import { Tracer, type TraceGraph } from '../trace/tracer.js';
 import { buildIR, type Expr } from '../ir/high_level.js';
 import { inferModuleShapes } from '../transform/shape_infer.js';
 import { constantFold } from '../transform/constant_fold.js';
@@ -34,6 +34,16 @@ export interface CompileOptions {
   backend?: RuntimeBackend;
 }
 
+interface SharedCompileArtifacts {
+  graph: TraceGraph;
+  simplifiedPrimFuncs: PrimFunc[];
+  runtimeParamNames: string[];
+}
+
+const MODEL_COMPILE_CACHE_ID = Symbol('mlcCompileCacheId');
+const sharedCompileCache = new Map<string, Map<string, SharedCompileArtifacts>>();
+let nextModelCompileCacheId = 0;
+
 function traceCompilerPhase(phase: number, title: string): void {
   printPhaseBanner(phase, title);
 }
@@ -44,7 +54,6 @@ function logVerification(label: string, result: ReturnType<typeof verifyHighLeve
 
 function optimizeIRToPrimFuncs(
   irMod: ReturnType<typeof buildIR>,
-  backend: RuntimeBackend,
   verbose: boolean,
 ): { primFuncs: PrimFunc[]; runtimeParamNames: string[] } {
   if (verbose) {
@@ -106,54 +115,13 @@ function optimizeIRToPrimFuncs(
       console.log('');
     }
     logVerification('Phase 4 low-level IR', verifyLowLevelIR(primFuncsRaw));
-    traceCompilerPhase(5, 'TensorIR Passes');
-    printSubSection('5.1 Arithmetic Simplification');
   }
 
   const simplified = primFuncsRaw.map((pf) => {
-    const next = arithmeticSimplify(pf);
-    if (verbose) {
-      console.log(`  ${pf.name}: applied algebraic rewrite rules`);
-    }
-    return next;
+    return arithmeticSimplify(pf);
   });
 
-  let optimized: PrimFunc[];
-  if (backend === 'wat') {
-    optimized = simplified;
-    if (verbose) {
-      printSubSection('5.2 Storage Rewrite');
-      console.log('  WAT backend: skipped storage rewrite to preserve the current WAT runtime pipeline.');
-      printSubSection('5.3 WebAssembly Text (WAT)');
-      const watModule = codegenWAT(optimized);
-      const pages = Math.ceil(watModule.totalBytes / 65536);
-      console.log(`  WAT module: ${optimized.length} kernel(s), ${pages} page(s) of linear memory`);
-      console.log(`  Exports: ${watModule.exports.join(', ')}`);
-      for (const kernel of watModule.kernels) {
-        console.log(`  ${kernel.name}: ${kernel.mode} (${kernel.weightLayout}) — ${kernel.note}`);
-      }
-      console.log('');
-      console.log(watModule.text);
-    }
-  } else {
-    if (verbose) {
-      printSubSection('5.2 Storage Rewrite');
-    }
-    optimized = simplified.map((pf) => {
-      const { func, stats } = storageRewrite(pf);
-      if (verbose) {
-        if (stats.promotedToScalar.length > 0) {
-          console.log(`  ${pf.name}: promoted [${stats.promotedToScalar.join(', ')}] to scalar`);
-          console.log(`    alloc: ${stats.originalAllocBytes}B → ${stats.optimizedAllocBytes}B`);
-        } else {
-          console.log(`  ${pf.name}: no scalar promotion needed`);
-        }
-      }
-      return func;
-    });
-  }
-
-  const uniquified = uniquifyPrimFuncNames(optimized);
+  const uniquified = uniquifyPrimFuncNames(simplified);
   return {
     primFuncs: uniquified,
     runtimeParamNames: collectRuntimeParamNames(fused.getFunction('main')?.body),
@@ -194,6 +162,73 @@ function uniquifyPrimFuncNames(primFuncs: PrimFunc[]): PrimFunc[] {
   });
 }
 
+function compileBackendPrimFuncs(
+  simplifiedPrimFuncs: PrimFunc[],
+  backend: RuntimeBackend,
+  verbose: boolean,
+  reusedFrontend: boolean,
+): PrimFunc[] {
+  if (verbose) {
+    traceCompilerPhase(5, 'TensorIR Passes');
+    printSubSection('5.1 Arithmetic Simplification');
+    console.log(reusedFrontend
+      ? '  Reused cached arithmetic-simplified PrimFunc(s) from the previous compile.'
+      : '  Arithmetic simplification already applied during this compile.');
+  }
+
+  if (backend === 'wat') {
+    if (verbose) {
+      printSubSection('5.2 Storage Rewrite');
+      console.log('  WAT backend: skipped storage rewrite to preserve the current WAT runtime pipeline.');
+      printSubSection('5.3 WebAssembly Text (WAT)');
+      const watModule = codegenWAT(simplifiedPrimFuncs);
+      const pages = Math.ceil(watModule.totalBytes / 65536);
+      console.log(`  WAT module: ${simplifiedPrimFuncs.length} kernel(s), ${pages} page(s) of linear memory`);
+      console.log(`  Exports: ${watModule.exports.join(', ')}`);
+      for (const kernel of watModule.kernels) {
+        console.log(`  ${kernel.name}: ${kernel.mode} (${kernel.weightLayout}) — ${kernel.note}`);
+      }
+      console.log('');
+      console.log(watModule.text);
+    }
+    return simplifiedPrimFuncs.map(pf => pf.clone());
+  }
+
+  if (verbose) {
+    printSubSection('5.2 Storage Rewrite');
+  }
+  return simplifiedPrimFuncs.map((pf) => {
+    const { func, stats } = storageRewrite(pf);
+    if (verbose) {
+      if (stats.promotedToScalar.length > 0) {
+        console.log(`  ${pf.name}: promoted [${stats.promotedToScalar.join(', ')}] to scalar`);
+        console.log(`    alloc: ${stats.originalAllocBytes}B → ${stats.optimizedAllocBytes}B`);
+      } else {
+        console.log(`  ${pf.name}: no scalar promotion needed`);
+      }
+    }
+    return func;
+  });
+}
+
+function getModelCompileCacheId(model: Module): string {
+  const taggedModel = model as Module & { [MODEL_COMPILE_CACHE_ID]?: string };
+  if (!taggedModel[MODEL_COMPILE_CACHE_ID]) {
+    taggedModel[MODEL_COMPILE_CACHE_ID] = `model_${nextModelCompileCacheId++}`;
+  }
+  return taggedModel[MODEL_COMPILE_CACHE_ID]!;
+}
+
+function getSharedCompileCache(model: Module): Map<string, SharedCompileArtifacts> {
+  const modelCacheId = getModelCompileCacheId(model);
+  let cache = sharedCompileCache.get(modelCacheId);
+  if (!cache) {
+    cache = new Map<string, SharedCompileArtifacts>();
+    sharedCompileCache.set(modelCacheId, cache);
+  }
+  return cache;
+}
+
 export class CompiledModule {
   private _model: Module;
   private _opts: Required<CompileOptions>;
@@ -228,22 +263,47 @@ export class CompiledModule {
 
   private _compile(inputShape: number[]): void {
     const t0 = performance.now();
-    const tracer = new Tracer();
-    if (this._opts.verbose) {
-      traceCompilerPhase(1, 'Model Tracing (Capture Computation Graph)');
-    }
-    const graph = tracer.traceInference(this._model, inputShape);
-    if (this._opts.verbose) {
-      console.log(Tracer.printGraph(graph));
-    }
-    const irMod = buildIR(graph);
-    const optimized = optimizeIRToPrimFuncs(irMod, this._opts.backend, this._opts.verbose);
+    const shapeKey = inputShape.join('x');
+    const compileCache = getSharedCompileCache(this._model);
+    const cached = compileCache.get(shapeKey);
 
-    this.primFuncs = optimized.primFuncs;
+    let shared: SharedCompileArtifacts;
+    if (cached) {
+      shared = cached;
+      if (this._opts.verbose) {
+        console.log('');
+        console.log(`Reusing cached frontend compile artifacts for input shape [${inputShape.join(', ')}].`);
+        console.log('Shared phases 1-4 are skipped; only backend-specific work is shown below.');
+      }
+    } else {
+      const tracer = new Tracer();
+      if (this._opts.verbose) {
+        traceCompilerPhase(1, 'Model Tracing (Capture Computation Graph)');
+      }
+      const graph = tracer.traceInference(this._model, inputShape);
+      if (this._opts.verbose) {
+        console.log(Tracer.printGraph(graph));
+      }
+      const irMod = buildIR(graph);
+      const optimized = optimizeIRToPrimFuncs(irMod, this._opts.verbose);
+      shared = {
+        graph,
+        simplifiedPrimFuncs: optimized.primFuncs,
+        runtimeParamNames: optimized.runtimeParamNames,
+      };
+      compileCache.set(shapeKey, shared);
+    }
+
+    this.primFuncs = compileBackendPrimFuncs(
+      shared.simplifiedPrimFuncs,
+      this._opts.backend,
+      this._opts.verbose,
+      Boolean(cached),
+    );
 
     const paramsMap = new Map<string, Tensor>();
-    for (const name of optimized.runtimeParamNames) {
-      const traced = graph.params.get(name);
+    for (const name of shared.runtimeParamNames) {
+      const traced = shared.graph.params.get(name);
       if (traced) {
         paramsMap.set(name, traced.tensor);
       }
