@@ -110,18 +110,36 @@ function inferOutputShape(
     case 'fused.sigmoid_bce':
       return [1];
 
-    // ── Gradient ops: same shape as first input ──
-    case 'nn.dense_grad_data':
-    case 'nn.dense_grad_weight':
+    // ── Gradient ops ──
+    case 'nn.dense_grad_data': {
+      const [M, N] = argShapes[0] ?? [];
+      const [, K] = argShapes[1] ?? [];
+      if (M == null || N == null || K == null) return null;
+      return [M, K];
+    }
+
+    case 'nn.dense_grad_weight': {
+      const [, K] = argShapes[0] ?? [];
+      const [, N] = argShapes[1] ?? [];
+      if (K == null || N == null) return null;
+      return [N, K];
+    }
+
     case 'nn.relu_grad':
     case 'nn.sigmoid_grad':
     case 'nn.tanh_grad':
     case 'nn.leaky_relu_grad':
     case 'nn.softmax_grad':
-    case 'nn.bias_add_grad':
     case 'nn.cross_entropy_grad':
     case 'nn.bce_grad':
       return argShapes[0] ?? null;
+
+    case 'nn.bias_add_grad': {
+      const inputShape = argShapes[0] ?? null;
+      if (!inputShape || inputShape.length === 0) return null;
+      const lastDim = inputShape[inputShape.length - 1];
+      return [1, lastDim];
+    }
 
     default:
       // Fall back to attrs.outputShape if lowering already set it

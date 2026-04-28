@@ -1,17 +1,3 @@
-// ═══════════════════════════════════════════════════════════════
-//  test_decorator_compile.ts — API flexibility tests for @compile
-//
-//  Tests:
-//    1. Lazy compile  — mlcCompile(model) no inputShape
-//    2. Eager compile — mlcCompile(model, { inputShape })
-//    3. @compile class decorator
-//    4. Custom non-Sequential model (class extends Module)
-//    5. Verbose mode
-//    6. Correctness vs RuntimeModule reference (max delta < 1e-4)
-//    7. Benchmark: GradTensor engine vs compiled
-//    8. recompile() with new batch size
-// ═══════════════════════════════════════════════════════════════
-
 import { NDArray } from './tensor/ndarray.js';
 import { GradTensor, engine } from './autograd/engine.js';
 import { Linear, ReLU, Sequential, type Module } from './model/nn.js';
@@ -25,17 +11,12 @@ import { cseModule } from './transform/cse.js';
 import { lowerModule } from './lower/lowering.js';
 import { arithmeticSimplify } from './transform/arithmetic_simplify.js';
 import { storageRewrite } from './transform/storage_rewrite.js';
-import { mlcCompile, compile, CompiledModule } from './compile/decorator.js';
-import { denseOp, biasAddOp, reluOp } from './autograd/grad_ops.js';
-
-// ─── Constants ────────────────────────────────────────────────
+import { mlcCompile, compile } from './compile/decorator.js';
 
 const BATCH = 4;
 const IN    = 32;
 const HID   = 64;
 const OUT   = 8;
-
-// ─── Helpers ──────────────────────────────────────────────────
 
 function sep(label: string) {
   console.log(`\n${'─'.repeat(60)}`);
@@ -66,7 +47,6 @@ function makeModel(): Sequential {
   ]);
 }
 
-/** Reference: run full MLC pipeline manually and return RuntimeModule output. */
 function referenceForward(model: Module, input: NDArray): NDArray {
   const tracer = new Tracer();
   const graph  = tracer.traceInference(model, input.shape);
@@ -84,8 +64,6 @@ function referenceForward(model: Module, input: NDArray): NDArray {
   return rt.forward(input);
 }
 
-// ─── Test Runner ──────────────────────────────────────────────
-
 let testsPassed = 0;
 let testsFailed = 0;
 
@@ -100,15 +78,10 @@ function test(name: string, fn: () => void): void {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════
-//  Main
-// ═══════════════════════════════════════════════════════════════
-
 console.log('═'.repeat(60));
 console.log('  MLC @compile Decorator — API Flexibility Tests');
 console.log('═'.repeat(60));
 
-// ── Test 1: Lazy compile ───────────────────────────────────────
 sep('Test 1: Lazy compile (no inputShape)');
 test('lazy compile', () => {
   const model = makeModel();
@@ -140,7 +113,6 @@ test('lazy compile', () => {
   console.log(`  Second forward() does NOT retrace: ✓`);
 });
 
-// ── Test 2: Eager compile ──────────────────────────────────────
 sep('Test 2: Eager compile (inputShape provided upfront)');
 test('eager compile', () => {
   const model    = makeModel();
@@ -162,7 +134,6 @@ test('eager compile', () => {
     throw new Error(`Wrong output shape: [${out.shape}]`);
 });
 
-// ── Test 3: @compile class decorator ─────────────────────────
 sep('Test 3: @compile class decorator');
 test('class decorator', () => {
   @compile({ useRegTile: true })
@@ -192,7 +163,6 @@ test('class decorator', () => {
     throw new Error(`Wrong output shape`);
 });
 
-// ── Test 4: Custom non-Sequential model ───────────────────────
 sep('Test 4: Custom non-Sequential model (class extends Module)');
 test('custom model', () => {
   class TwoLayerNet extends Sequential {
@@ -215,7 +185,6 @@ test('custom model', () => {
   console.log(`  kernels    : ${stats.kernelNames.join(', ')}`);
 });
 
-// ── Test 5: Verbose mode ──────────────────────────────────────
 sep('Test 5: Verbose mode');
 test('verbose mode', () => {
   const model    = makeModel();
@@ -226,23 +195,19 @@ test('verbose mode', () => {
   console.log(`  Verbose compile completed: ✓`);
 });
 
-// ── Test 6: Correctness vs manual RuntimeModule ───────────────
 sep('Test 6: Correctness — CompiledModule vs RuntimeModule reference');
 test('correctness', () => {
   const model   = makeModel();
   const input   = NDArray.rand([BATCH, IN]);
 
-  // Reference: manual pipeline
   const ref = referenceForward(model, input);
 
-  // Compiled path
   const compiled = mlcCompile(model, { inputShape: [BATCH, IN] });
   const result   = compiled.forward(input);
 
   assertClose(ref, result, 1e-4, 'CompiledModule vs manual RuntimeModule');
 });
 
-// ── Test 7: Benchmark ─────────────────────────────────────────
 sep('Test 7: Benchmark — GradTensor engine vs CompiledModule');
 test('benchmark', () => {
   const model    = makeModel();
@@ -277,7 +242,6 @@ test('benchmark', () => {
   }
 });
 
-// ── Test 8: recompile() with new batch size ───────────────────
 sep('Test 8: recompile() — change batch size 4 → 8');
 test('recompile', () => {
   const model    = makeModel();
@@ -301,12 +265,10 @@ test('recompile', () => {
   if (out8.shape[0] !== NEW_BATCH || out8.shape[1] !== OUT)
     throw new Error(`Wrong output shape after recompile: [${out8.shape}]`);
 
-  // Verify new output matches fresh reference
   const ref8 = referenceForward(model, input8);
   assertClose(ref8, out8, 1e-4, 'recompiled output vs reference');
 });
 
-// ── Final Summary ─────────────────────────────────────────────
 console.log('\n' + '═'.repeat(60));
 console.log(`  Results: ${testsPassed} passed, ${testsFailed} failed`);
 if (testsFailed === 0) {

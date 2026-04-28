@@ -1,25 +1,3 @@
-// ═══════════════════════════════════════════════════════════════
-//  test_wat.ts — End-to-end WAT execution test (multiclass classifier)
-//
-//  Model: Linear(32,64)→ReLU→Linear(64,8),  batch=4
-//  Matches main.ts createClassifier('multiclass') exactly.
-//  → 2 PrimFuncs: fused_dense_bias_relu + fused_dense_bias
-//  → ~0.13 MFLOPs per forward pass
-//
-//  Pipeline:
-//    1. Build deep model, MLC pipeline (trace → lower → arithmeticSimplify)
-//    2. Generate WAT via codegenWAT (storageRewrite intentionally skipped!)
-//    3. Assemble WAT → WASM binary via wabt
-//    4. Instantiate in Node.js, marshal buffers, run N kernels generically
-//    5. Verify WASM output matches JS reference (max delta < 1e-4)
-//    6. Benchmark: JS vs WASM N-kernel forward pass
-//
-//  Key constraint: storageRewrite must NOT run before codegenWAT.
-//  WAT codegen detects scalar accumulators via func.allocations.
-//  After storageRewrite those allocs are removed and replaced by
-//  ScalarDeclNode/ScalarStoreNode — which WAT codegen doesn't handle.
-// ═══════════════════════════════════════════════════════════════
-
 import WabtModule from 'wabt';
 import { NDArray } from './tensor/ndarray.js';
 import { Linear, ReLU, Sequential } from './model/nn.js';
@@ -40,8 +18,6 @@ const HID    = 64;
 const OUT    = 8;
 const WARMUP = 300;
 const REPS   = 1000;
-
-// ─── helpers ──────────────────────────────────────────────────
 
 function sep(label: string) {
   console.log(`\n${'─'.repeat(60)}`);
@@ -65,8 +41,6 @@ function computeOffsets(funcs: ReturnType<typeof lowerModule>): Array<Map<string
   });
 }
 
-// ─── main ─────────────────────────────────────────────────────
-
 async function main() {
   console.log('═'.repeat(60));
   console.log('  WAT Execution Test — Multiclass Classifier');
@@ -74,7 +48,6 @@ async function main() {
   console.log(`  (matches main.ts createClassifier('multiclass'))`);
   console.log('═'.repeat(60));
 
-  // ── 1. Build model ───────────────────────────────────────────
   sep('1. Build model');
   const model = new Sequential([
     new Linear(IN,  HID),
@@ -95,11 +68,9 @@ async function main() {
     console.log(`  Layer ${i}: W[${w.data.shape.join('×')}], B[${b.data.shape.join('×')}]`);
   }
 
-  // Fixed input (same array used for both WASM and JS reference)
   const inputNd  = NDArray.rand([BATCH, IN]);
   const inputArr = inputNd.data;  // Float32Array [BATCH*IN]
 
-  // ── 2. MLC Pipeline ──────────────────────────────────────────
   sep('2. MLC Pipeline');
   console.log('  traceInference → buildIR → constantFold → fuseOps');
   console.log('  → deadCodeElimination → cseModule → lowerModule → arithmeticSimplify');
@@ -147,7 +118,6 @@ async function main() {
     console.log(`    kernel ${i}  ${optFuncs[i].name.padEnd(26)}  ${(kernelFlops[i]/1e3).toFixed(0).padStart(6)} KFLOPs`);
   }
 
-  // ── 3. WAT Codegen ───────────────────────────────────────────
   sep('3. WAT Codegen');
   const watMod = codegenWAT(optFuncs);
   const watPages = Math.ceil(watMod.totalBytes / 65536);
@@ -166,7 +136,6 @@ async function main() {
     }
   }
 
-  // ── 4. Assemble WAT → WASM ───────────────────────────────────
   sep('4. Assemble WAT → WASM');
   const wabt    = await WabtModule();
   const wasmSrc = wabt.parseWat('kernels.wat', watMod.text);
@@ -174,9 +143,8 @@ async function main() {
   wasmSrc.destroy();
   console.log(`  Binary size : ${wasmBin.byteLength} bytes`);
 
-  // ── 5. Instantiate WASM ──────────────────────────────────────
   sep('5. Instantiate WASM');
-  const { instance } = await WebAssembly.instantiate(wasmBin);
+  const { instance } = await WebAssembly.instantiate(wasmBin) as unknown as { instance: WebAssembly.Instance };
   const wasmMem = instance.exports.memory as WebAssembly.Memory;
   const memF32  = new Float32Array(wasmMem.buffer);
   console.log(`  Memory      : ${wasmMem.buffer.byteLength / 1024}KB`);
@@ -186,9 +154,7 @@ async function main() {
     console.log(`  Kernel ${i}    : ${optFuncs[i].name}`);
   }
 
-  // ── 6. Marshal input + weights into WASM memory ──────────────
   sep('6. Marshal buffers → WASM linear memory');
-
   // Write input at kernel-0 A slot
   memF32.set(inputArr, funcOffsets[0].get('A')! / 4);
   // Write weights + biases for every kernel (slots are pre-allocated by codegenWAT)
@@ -200,7 +166,6 @@ async function main() {
   }
   console.log(`  Written ${writtenBytes} bytes`);
 
-  // ── 7. Execute WASM kernels (generic N-kernel pipeline) ───────
   sep('7. Execute WASM kernels');
 
   // Zero-copy activation pipe:
@@ -222,7 +187,6 @@ async function main() {
   const wasmOutput = new Float32Array(outElems);
   for (let i = 0; i < outElems; i++) wasmOutput[i] = memF32[finalOff / 4 + i];
 
-  // ── 8. JS reference (generic N-kernel forward) ───────────────
   sep('8. JS reference forward pass');
 
   const jsKernels = optFuncs.map(pf => compile(pf));
@@ -240,7 +204,6 @@ async function main() {
   const jsOutput = jsActBufs[jsActBufs.length - 1];
   console.log(`  Done (${optFuncs.length} kernels)`);
 
-  // ── 9. Verify ────────────────────────────────────────────────
   sep('9. Verify WASM vs JS');
 
   let maxDelta = 0;
@@ -253,7 +216,6 @@ async function main() {
   const THRESH = 1e-4;
   const pass   = maxDelta < THRESH;
 
-  // Print first few values side-by-side
   console.log(`  ${'idx'.padStart(4)}  ${'WASM'.padStart(12)}  ${'JS'.padStart(12)}  ${'|diff|'.padStart(12)}`);
   for (let i = 0; i < Math.min(outElems, 8); i++) {
     const d = Math.abs(wasmOutput[i] - jsOutput[i]);
@@ -264,10 +226,8 @@ async function main() {
   console.log(`  threshold      = ${THRESH.toExponential(0)}`);
   console.log(`  ${pass ? '✓ PASS' : '✗ FAIL'}`);
 
-  // ── 10. Benchmark ────────────────────────────────────────────
   sep('10. Benchmark');
 
-  // Helper: run one full JS forward pass
   function runJS() {
     let act: Float32Array = inputArr;
     for (let i = 0; i < optFuncs.length; i++) {
@@ -276,7 +236,6 @@ async function main() {
     }
   }
 
-  // Helper: run one full WASM forward pass
   function runWASM() {
     let prevOut = funcOffsets[0].get('A')!;
     for (let i = 0; i < optFuncs.length; i++) {
@@ -309,7 +268,6 @@ async function main() {
   console.log(`  WASM ${optFuncs.length}-kernel forward : ${wasmMs.toFixed(4)} ms/call  (${wasmGflops.toFixed(2)} GFLOP/s)`);
   console.log(`  Speedup               : ${speedup.toFixed(2)}×  (${speedup >= 1 ? 'WASM faster' : 'JS faster'})`);
 
-  // ── Final summary ────────────────────────────────────────────
   console.log('\n' + '═'.repeat(60));
   console.log(`  Result: ${pass ? '✓ PASS' : '✗ FAIL'}  |  max delta = ${maxDelta.toExponential(3)}`);
   console.log('═'.repeat(60));

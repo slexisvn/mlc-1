@@ -18,18 +18,17 @@
 
 import { NDArray } from './tensor/ndarray.js';
 import { GradTensor, engine } from './autograd/engine.js';
-import { Linear, ReLU, Sigmoid, Tanh, LeakyReLU, Sequential, BatchNorm, type Module } from './model/nn.js';
-import { CrossEntropyLoss, BCEWithLogitsLoss, MSELoss, type Loss } from './loss/loss.js';
+import { Linear, ReLU, Sequential, BatchNorm, type Module } from './model/nn.js';
+import { CrossEntropyLoss, BCEWithLogitsLoss, type Loss } from './loss/loss.js';
 import { SGD } from './optim/sgd.js';
 import { Adam } from './optim/adam.js';
-import { sumOp } from './autograd/grad_ops.js';
 import { Tracer } from './trace/tracer.js';
-import { buildIR, type IRModule } from './ir/high_level.js';
+import { buildIR } from './ir/high_level.js';
 import { constantFold } from './transform/constant_fold.js';
 import { fuseOps, fusionStats } from './transform/op_fusion.js';
-import { lowerModule, lowerOp } from './lower/lowering.js';
+import { lowerModule } from './lower/lowering.js';
 import { Schedule } from './transform/schedule.js';
-import { codegenJS, compile, registerTileJS } from './codegen/js_codegen.js';
+import { codegenJS, registerTileJS } from './codegen/js_codegen.js';
 import { vectorize, SIMD_WIDTH } from './transform/vectorize.js';
 import { codegenWAT } from './codegen/wat_codegen.js';
 import { autoTune, printSearchProgress, applyConfig } from './tune/auto_tune.js';
@@ -49,7 +48,7 @@ import { cseModule } from './transform/cse.js';
 import { layoutTransform } from './transform/layout_transform.js';
 import { inferModuleShapes } from './transform/shape_infer.js';
 import { verifyHighLevelIR, verifyLowLevelIR, printVerifyResult } from './transform/verifier.js';
-import { computeInline, demoComputeInline } from './transform/compute_inline.js';
+import { demoComputeInline } from './transform/compute_inline.js';
 import { quantizeModule, measureQuantQuality } from './transform/quantize.js';
 
 // ═══════════════════════════════════════

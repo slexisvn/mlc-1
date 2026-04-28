@@ -170,8 +170,14 @@ export class IRModule {
 
 // ─── Build IR from TraceGraph ───
 
-export function buildIR(graph: TraceGraph): IRModule {
+export interface BuildIROptions {
+  root?: 'forward' | 'loss';
+  rootId?: number;
+}
+
+export function buildIR(graph: TraceGraph, options: BuildIROptions = {}): IRModule {
   const module = new IRModule();
+  const root = options.root ?? 'forward';
 
   // Create input var
   const inputVar = new VarExpr('x', new TensorType(graph.inputShape));
@@ -185,8 +191,12 @@ export function buildIR(graph: TraceGraph): IRModule {
 
   // Map target if exists
   if (graph.targetId !== undefined) {
-    const targetVar = new VarExpr('target', new TensorType([1]));
+    const targetVar = new VarExpr('target', new TensorType(graph.targetShape ?? [1]));
     exprMap.set(graph.targetId, targetVar);
+  }
+
+  if (graph.backwardSeedId !== undefined) {
+    exprMap.set(graph.backwardSeedId, new ConstantExpr(NDArray.ones([1]), 'loss_grad'));
   }
 
   // Build expression tree from trace nodes
@@ -213,21 +223,26 @@ export function buildIR(graph: TraceGraph): IRModule {
     exprMap.set(node.id, call);
   }
 
-  // Get the forward output expression (NOT the loss/backward chain).
-  // Using graph.outputId as root means the IR represents forward inference only.
-  // Loss and backward ops are not reachable from this root — DCE will eliminate them
-  // if they appear as dead LetExpr bindings (e.g., added by wrapWithDeadCode).
-  const bodyExpr = exprMap.get(graph.outputId);
+  const rootId = options.rootId ?? (root === 'loss' ? graph.lossId : graph.outputId);
+  if (root === 'loss' && rootId === undefined) {
+    throw new Error('Could not build IR: missing loss root in TraceGraph');
+  }
 
-  if (!bodyExpr) throw new Error('Could not build IR: missing output expression');
+  const bodyExpr = rootId !== undefined ? exprMap.get(rootId) : undefined;
+
+  if (!bodyExpr) throw new Error(`Could not build IR: missing ${root} expression`);
 
   // Create main function with Let bindings for readability
   const params = [inputVar];
   if (graph.targetId !== undefined) {
-    params.push(new VarExpr('target', new TensorType([1])));
+    params.push(new VarExpr('target', new TensorType(graph.targetShape ?? [1])));
   }
 
-  const retShape = graph.outputShape;
+  const retShape = bodyExpr.kind === 'call'
+    ? ((bodyExpr.attrs.outputShape as number[] | undefined) ?? (root === 'loss' ? [1] : graph.outputShape))
+    : root === 'loss'
+      ? [1]
+      : graph.outputShape;
   const mainFunc = new IRFunction(
     'main',
     params,

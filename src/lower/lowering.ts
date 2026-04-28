@@ -384,6 +384,55 @@ function lowerDenseGradWeight(M: number, K: number, N: number): PrimFunc {
   return new PrimFunc('dense_grad_weight', [X, dY, dW], body, [accum]);
 }
 
+// ─── BiasAdd Gradient: dB[j] = sum_i(dY[i,j]) ───
+function lowerBiasAddGrad(M: number, N: number): PrimFunc {
+  const dY = new BufferDecl('dY', [M, N]);
+  const dB = new BufferDecl('dB', [1, N]);
+  const accum = new BufferDecl('acc', [1], 'local');
+
+  const j = new LoopVar('j', 'spatial');
+  const i = new LoopVar('i', 'reduction');
+
+  const body = new ForNode(j, 0, N,
+    new SeqNode([
+      new BufferStoreNode(accum, [constIdx(0)], constVal(0)),
+      new ForNode(i, 0, M,
+        new BufferStoreNode(accum, [constIdx(0)],
+          binop('+', load(accum, [constIdx(0)]), load(dY, [varIdx(i), varIdx(j)]))
+        )
+      ),
+      new BufferStoreNode(dB, [constIdx(0), varIdx(j)], load(accum, [constIdx(0)])),
+    ])
+  );
+
+  return new PrimFunc('bias_add_grad', [dY, dB], body, [accum]);
+}
+
+// ─── ReLU Gradient: dX = dY * sign(max(X, 0)) ───
+function lowerReluGrad(M: number, N: number): PrimFunc {
+  const dY = new BufferDecl('dY', [M, N]);
+  const X = new BufferDecl('X', [M, N]);
+  const dX = new BufferDecl('dX', [M, N]);
+
+  const i = new LoopVar('i', 'spatial');
+  const j = new LoopVar('j', 'spatial');
+
+  const body = new ForNode(i, 0, M,
+    new ForNode(j, 0, N,
+      new BufferStoreNode(dX, [varIdx(i), varIdx(j)],
+        binop('*',
+          load(dY, [varIdx(i), varIdx(j)]),
+          new CallExprTIR('Math.sign', [
+            new MaxExpr(load(X, [varIdx(i), varIdx(j)]), constVal(0))
+          ])
+        )
+      )
+    )
+  );
+
+  return new PrimFunc('relu_grad', [dY, X, dX], body);
+}
+
 // ─── Softmax+CE Gradient: dLogits[i,j] = softmax[i,j] - one_hot[i,j] ───
 function lowerSoftmaxCEGrad(M: number, N: number): PrimFunc {
   const Logits = new BufferDecl('Logits', [M, N]);
@@ -520,7 +569,15 @@ export function lowerOp(opName: string, shapes: number[][]): PrimFunc | null {
       const [M, N] = shapes[0];
       return lowerSoftmaxCE(M, N);
     }
+    case 'cross_entropy': {
+      const [M, N] = shapes[0];
+      return lowerSoftmaxCE(M, N);
+    }
     case 'fused.sigmoid_bce': {
+      const [M, N] = shapes[0];
+      return lowerSigmoidBCE(M, N);
+    }
+    case 'bce_with_logits': {
       const [M, N] = shapes[0];
       return lowerSigmoidBCE(M, N);
     }
@@ -533,6 +590,14 @@ export function lowerOp(opName: string, shapes: number[][]): PrimFunc | null {
       const [M, K] = shapes[0]; // X
       const [, N] = shapes[1]; // dY: [M, N]
       return lowerDenseGradWeight(M, K, N);
+    }
+    case 'nn.bias_add_grad': {
+      const [M, N] = shapes[0];
+      return lowerBiasAddGrad(M, N);
+    }
+    case 'nn.relu_grad': {
+      const [M, N] = shapes[0];
+      return lowerReluGrad(M, N);
     }
     case 'nn.cross_entropy_grad':
     case 'fused.softmax_ce_grad': {

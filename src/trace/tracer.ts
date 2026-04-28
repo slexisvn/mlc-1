@@ -24,6 +24,7 @@ export interface TraceGraph {
   outputId: number;
   outputShape: number[];
   targetId?: number;
+  targetShape?: number[];
   // Forward vs backward boundary
   forwardEndIdx: number;      // nodes[0..forwardEndIdx-1] = forward
   backwardStartIdx: number;   // nodes[backwardStartIdx..end] = backward
@@ -31,6 +32,8 @@ export interface TraceGraph {
   params: Map<string, { tensor: GradTensor; shape: number[] }>;
   // Loss value node
   lossId?: number;
+  backwardSeedId?: number;
+  gradientIds: Map<number, number>;
 }
 
 let _traceNextId = 0;
@@ -74,6 +77,7 @@ export class Tracer {
       forwardEndIdx: nodes.length,
       backwardStartIdx: nodes.length,
       params,
+      gradientIds: new Map(),
     };
   }
 
@@ -119,14 +123,23 @@ export class Tracer {
       params.set(`param_${i}`, { tensor: p, shape: [...p.data.shape] });
     }
 
-    // Convert tape entries to trace nodes  
-    const nodes: TraceNode[] = globalEngine.tape.map((entry) => ({
+    const forwardAndLossNodes: TraceNode[] = globalEngine.tape.map((entry) => ({
       id: entry.output.id,
       op: entry.op,
       inputs: entry.inputs.map(inp => inp.id),
       outputShape: [...entry.output.data.shape],
       attrs: {},
     }));
+
+    const backwardNodes: TraceNode[] = globalEngine.backwardTrace.map((node) => ({
+      id: node.id,
+      op: node.op,
+      inputs: [...node.inputs],
+      outputShape: [...node.outputShape],
+      attrs: { ...node.attrs },
+    }));
+
+    const nodes = [...forwardAndLossNodes, ...backwardNodes];
 
     return {
       nodes,
@@ -135,9 +148,12 @@ export class Tracer {
       outputId: output.id,
       outputShape: [...output.data.shape],
       targetId,
+      targetShape: [...targetShape],
       forwardEndIdx,
       backwardStartIdx: lossIdx,
       lossId: loss.id,
+      backwardSeedId: globalEngine.backwardSeedId,
+      gradientIds: new Map(globalEngine.gradientTensorIds),
       params,
     };
   }

@@ -19,9 +19,11 @@
 
 import { NDArray } from '../tensor/ndarray.js';
 import { GradTensor } from '../autograd/engine.js';
+import { Loss } from '../loss/loss.js';
 import { type Module } from '../model/nn.js';
 import { Tracer } from '../trace/tracer.js';
 import { buildIR } from '../ir/high_level.js';
+import { inferModuleShapes } from '../transform/shape_infer.js';
 import { constantFold } from '../transform/constant_fold.js';
 import { fuseOps } from '../transform/op_fusion.js';
 import { deadCodeElimination } from '../transform/dead_code_elimination.js';
@@ -51,6 +53,23 @@ export interface CompileStats {
   compilationMs: number;
   /** Date.now() when compilation finished. */
   compiledAt: number;
+}
+
+export interface TrainingCompileArtifacts {
+  graph: ReturnType<Tracer['traceTraining']>;
+  forwardKernels: PrimFunc[];
+  lossKernels: PrimFunc[];
+  paramGradKernels: Map<string, PrimFunc[]>;
+}
+
+function optimizeIRToPrimFuncs(irMod: ReturnType<typeof buildIR>): PrimFunc[] {
+  inferModuleShapes(irMod);
+  const folded = constantFold(irMod);
+  const fused = fuseOps(folded);
+  const { module: dceMod } = deadCodeElimination(fused);
+  const { module: cseMod } = cseModule(dceMod);
+  const primFuncsRaw = lowerModule(cseMod);
+  return primFuncsRaw.map(pf => storageRewrite(arithmeticSimplify(pf)).func);
 }
 
 // ─── CompiledModule ───────────────────────────────────────────
@@ -121,20 +140,7 @@ export class CompiledModule {
 
     // 2. High-level IR + graph-level optimizations
     const irMod    = buildIR(graph);
-    const folded   = constantFold(irMod);
-    const fused    = fuseOps(folded);
-    const { module: dceMod } = deadCodeElimination(fused);
-    const { module: cseMod } = cseModule(dceMod);
-
-    // 3. Lower to TensorIR (loop nests)
-    const primFuncsRaw = lowerModule(cseMod);
-
-    // 4. TensorIR passes
-    //    arithmeticSimplify: safe always
-    //    storageRewrite: safe for JS backend (promotes size-1 buffers to scalars)
-    const optimized = primFuncsRaw.map(pf =>
-      storageRewrite(arithmeticSimplify(pf)).func
-    );
+    const optimized = optimizeIRToPrimFuncs(irMod);
 
     this.primFuncs = optimized;
 
@@ -166,6 +172,33 @@ export class CompiledModule {
       }
     }
   }
+}
+
+export function compileTrainingArtifacts(
+  model: Module,
+  loss: Loss,
+  inputShape: number[],
+  targetShape: number[]
+): TrainingCompileArtifacts {
+  const tracer = new Tracer();
+  const graph = tracer.traceTraining(model, loss, inputShape, targetShape);
+
+  const forwardKernels = optimizeIRToPrimFuncs(buildIR(graph));
+  const lossKernels = optimizeIRToPrimFuncs(buildIR(graph, { root: 'loss' }));
+  const paramGradKernels = new Map<string, PrimFunc[]>();
+
+  for (const [name, info] of graph.params) {
+    const gradId = graph.gradientIds.get(info.tensor.id);
+    if (gradId === undefined) continue;
+    paramGradKernels.set(name, optimizeIRToPrimFuncs(buildIR(graph, { rootId: gradId })));
+  }
+
+  return {
+    graph,
+    forwardKernels,
+    lossKernels,
+    paramGradKernels,
+  };
 }
 
 // ─── mlcCompile() ────────────────────────────────────────────
